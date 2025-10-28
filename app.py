@@ -1,6 +1,9 @@
 import streamlit as st
 import os, io, shutil, tempfile, zipfile
-from pypdf import PdfReader, PdfWriter
+try:
+    from pypdf import PdfReader, PdfWriter
+except ModuleNotFoundError:
+    from PyPDF2 import PdfReader, PdfWriter  # yedek
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
