@@ -332,15 +332,18 @@ with tab_a:
                 st.error(f".docx okunamadı: {e}")
 
     st.subheader("Görünüm Ayarları")
-    c1, c2 = st.columns(2)
-    with c1:
-        font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, st.session_state["settings"]["font_size"])
-        leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, st.session_state["settings"]["leading"])
-    with c2:
-        align     = st.radio("Hizalama", ["left", "center"], index=0 if st.session_state["settings"]["align"]=="left" else 1, format_func=lambda x: "Sol" if x=="left" else "Orta")
-bottom_m  = st.slider("Alt Marj (pt)", 24, 100, st.session_state["settings"]["bottom_m"])
-box_h     = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, st.session_state["settings"]["box_h"])
-    bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True, key="boldrules")
+c1, c2 = st.columns(2)
+
+with c1:
+    font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, st.session_state["settings"]["font_size"])
+    leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, st.session_state["settings"]["leading"])
+
+with c2:
+    align     = st.radio("Hizalama", ["left", "center"], index=0 if st.session_state["settings"]["align"]=="left" else 1, format_func=lambda x: "Sol" if x=="left" else "Orta")
+    bottom_m  = st.slider("Alt Marj (pt)", 24, 100, st.session_state["settings"]["bottom_m"])
+
+box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, st.session_state["settings"]["box_h"])
+bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True, key="boldrules")
 
     st.subheader("İşlem")
     mode = st.radio(
