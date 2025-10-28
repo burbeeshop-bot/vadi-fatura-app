@@ -388,133 +388,209 @@ with tab_a:
 
 
 # --------------- TAB B: Apsiyon Gider Doldurucu ---------------
-with tab_b:
-    st.header("📊 Apsiyon Gider Doldurucu (PDF → Apsiyon boş şablon)")
+# ================== A P S İ Y O N  (Sağlam okuma + doldurma) ==================
+import pandas as pd
+from io import BytesIO
 
-    pdf_b = st.file_uploader("Manas PDF (aynı PDF)", type=["pdf"], key="pdf_b")
-    xlsx  = st.file_uploader("Apsiyon boş Excel (xlsx)", type=["xlsx"], key="xlsx")
+def _norm(s: str) -> str:
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace(".", "")
+        .replace("_", " ")
+        .replace("-", " ")
+    )
 
-    st.markdown("**Yerleşim (Seçenek 1):** Gider1 = **Sıcak Su**, Gider2 = **Su**, Gider3 = **Isıtma**  \n"
-                "**Yerleşim (Seçenek 2):** Gider1 = **Toplam** (tek kalem), Gider2/3 boş")
+def _pad3(x) -> str:
+    try:
+        n = int(str(x).strip())
+        return f"{n:03d}"
+    except:
+        # "01" gibi gelmişse
+        s = str(x).strip()
+        # en sondaki sayıları bul
+        nums = "".join([ch for ch in s if ch.isdigit()])
+        if nums:
+            return f"{int(nums):03d}"
+        return s  # son çare
 
-    choice = st.radio("Doldurma şekli", ["Seçenek 1 (3 kalem)", "Seçenek 2 (toplam tek kalem)"], index=0, key="fillopt")
+def _find_header_row(df_raw: pd.DataFrame) -> int | None:
+    """
+    İlk 15 satırda 'blok' ve ('daire no' | 'daire') geçen bir satırı başlık sayar.
+    """
+    limit = min(15, len(df_raw))
+    for i in range(limit):
+        cells = [_norm(c) for c in list(df_raw.iloc[i].values)]
+        row_text = " | ".join(cells)
+        if ("blok" in row_text) and (("daire no" in row_text) or ("daire" in row_text)):
+            return i
+    return None
 
-    colx = st.columns(3)
-    with colx[0]:
-        acik1 = st.text_input("Gider1 Açıklaması", "Sıcak Su", key="g1a")
-    with colx[1]:
-        acik2 = st.text_input("Gider2 Açıklaması", "Su", key="g2a")
-    with colx[2]:
-        acik3 = st.text_input("Gider3 Açıklaması", "Isıtma", key="g3a")
+def _rename_apsiyon_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sütunları normalize edip 'Blok', 'Daire No' yakalar; mevcutsa Gider sütunlarını korur.
+    """
+    mapping = {}
+    for c in df.columns:
+        nc = _norm(c)
+        if "blok" == nc:
+            mapping[c] = "Blok"
+        elif ("daire no" == nc) or (nc == "daire") or ("daire  no" == nc) or ("daireno" == nc):
+            mapping[c] = "Daire No"
+        elif "gider1 tutarı" in nc or "gider 1 tutarı" in nc or "gider1 tutari" in nc:
+            mapping[c] = "Gider1 Tutarı"
+        elif "gider1 açıklaması" in nc or "gider 1 aciklamasi" in nc or "gider1 aciklamasi" in nc:
+            mapping[c] = "Gider1 Açıklaması"
+        elif "gider2 tutarı" in nc or "gider 2 tutarı" in nc or "gider2 tutari" in nc:
+            mapping[c] = "Gider2 Tutarı"
+        elif "gider2 açıklaması" in nc or "gider 2 aciklamasi" in nc or "gider2 aciklamasi" in nc:
+            mapping[c] = "Gider2 Açıklaması"
+        elif "gider3 tutarı" in nc or "gider 3 tutarı" in nc or "gider3 tutari" in nc:
+            mapping[c] = "Gider3 Tutarı"
+        elif "gider3 açıklaması" in nc or "gider 3 aciklamasi" in nc or "gider3 aciklamasi" in nc:
+            mapping[c] = "Gider3 Açıklaması"
+        # diğer tüm sütunlar aynen kalsın
 
-    go_b = st.button("🧩 Excel’i Doldur ve İndir", key="go_b")
+    df2 = df.rename(columns=mapping)
 
-    if go_b:
-        if not pdf_b or not xlsx:
-            st.warning("PDF ve Excel yükleyin.")
-            st.stop()
+    # Eksikse gider sütunlarını oluştur
+    for col in [
+        "Gider1 Tutarı", "Gider1 Açıklaması",
+        "Gider2 Tutarı", "Gider2 Açıklaması",
+        "Gider3 Tutarı", "Gider3 Açıklaması",
+    ]:
+        if col not in df2.columns:
+            df2[col] = None
 
-        # 1) PDF'ten tutarları çıkar
-        totals = parse_manas_pdf_totals(pdf_b.read())
-        if not totals:
-            st.error("PDF’ten tutar okunamadı. (Daire başlıkları bulunamadı)")
-            st.stop()
+    return df2
 
-        # st.write("Bulunan daireler:", list(totals.keys())[:10])
-        # st.dataframe(pd.DataFrame.from_dict(totals, orient="index"))
+def load_apsiyon_template(excel_bytes: bytes) -> pd.DataFrame:
+    # Önce ham okuma (başlıksız gibi)
+    raw = pd.read_excel(BytesIO(excel_bytes), header=None, engine="openpyxl")
+    hdr = _find_header_row(raw)
+    if hdr is None:
+        # Yine de deneriz: normal header=0 ile
+        df = pd.read_excel(BytesIO(excel_bytes), engine="openpyxl")
+    else:
+        df = pd.read_excel(BytesIO(excel_bytes), header=hdr, engine="openpyxl")
 
-        # 2) Excel’i oku
-        try:
-            df = pd.read_excel(xlsx)
-        except Exception as e:
-            st.error(f"Excel okunamadı: {e}")
-            st.stop()
+    df = _rename_apsiyon_cols(df)
 
-        # 3) DaireID üret (Blok + Daire No)
-        # Kolon adlarını normalleştirerek bul
-        cols = { _normalize_tr(c): c for c in df.columns }
-        col_blok = cols.get("BLOK") or cols.get("BLOK ADI")
-        col_dno  = cols.get("DAIRE NO") or cols.get("DAIRE NO:")
-        if not (col_blok and col_dno):
-            st.error("Excel’de 'Blok' ve 'Daire No' sütunları bulunamadı.")
-            st.stop()
-
-        # Gider sütunları (adlar aynen korunur; yoksa oluşturulur)
-        def find_col(name_try: List[str]) -> str|None:
-            norm = { _normalize_tr(c): c for c in df.columns }
-            for n in name_try:
-                got = norm.get(_normalize_tr(n))
-                if got: return got
-            return None
-
-        col_g1_t = find_col(["Gider1 Tutarı","Gider 1 Tutarı"])
-        col_g1_a = find_col(["Gider1 Açıklaması","Gider 1 Açıklaması"])
-        col_g2_t = find_col(["Gider2 Tutarı","Gider 2 Tutarı"])
-        col_g2_a = find_col(["Gider2 Açıklaması","Gider 2 Açıklaması"])
-        col_g3_t = find_col(["Gider3 Tutarı","Gider 3 Tutarı"])
-        col_g3_a = find_col(["Gider3 Açıklaması","Gider 3 Açıklaması"])
-
-        # Yoksa ekle
-        for want, default_name in [
-            (col_g1_t, "Gider1 Tutarı"), (col_g1_a, "Gider1 Açıklaması"),
-            (col_g2_t, "Gider2 Tutarı"), (col_g2_a, "Gider2 Açıklaması"),
-            (col_g3_t, "Gider3 Tutarı"), (col_g3_a, "Gider3 Açıklaması"),
-        ]:
-            if want is None:
-                df[default_name] = None
-
-        # Gerçek isimleri tekrar al
-        cols = { _normalize_tr(c): c for c in df.columns }
-        col_g1_t = cols.get(_normalize_tr(col_g1_t or "Gider1 Tutarı")) or "Gider1 Tutarı"
-        col_g1_a = cols.get(_normalize_tr(col_g1_a or "Gider1 Açıklaması")) or "Gider1 Açıklaması"
-        col_g2_t = cols.get(_normalize_tr(col_g2_t or "Gider2 Tutarı")) or "Gider2 Tutarı"
-        col_g2_a = cols.get(_normalize_tr(col_g2_a or "Gider2 Açıklaması")) or "Gider2 Açıklaması"
-        col_g3_t = cols.get(_normalize_tr(col_g3_t or "Gider3 Tutarı")) or "Gider3 Tutarı"
-        col_g3_a = cols.get(_normalize_tr(col_g3_a or "Gider3 Açıklaması")) or "Gider3 Açıklaması"
-
-        # DaireID sütunu (geçici)
-        def make_id(row) -> str:
-            blok = str(row.get(col_blok,"")).strip().upper()
-            dno  = _pad3(str(row.get(col_dno,"")))
-            return f"{blok}-{dno}"
-        df["_DaireID_"] = df.apply(make_id, axis=1)
-
-        # 4) Doldurma
-        filled = 0
-        for idx, row in df.iterrows():
-            did = row["_DaireID_"]
-            t = totals.get(did)
-            if not t:
-                continue
-
-            if choice.startswith("Seçenek 1"):
-                # Gider1 = Sıcak Su, Gider2 = Su, Gider3 = Isıtma
-                df.at[idx, col_g1_t] = round(t["sicak"], 2)
-                df.at[idx, col_g1_a] = acik1
-                df.at[idx, col_g2_t] = round(t["su"], 2)
-                df.at[idx, col_g2_a] = acik2
-                df.at[idx, col_g3_t] = round(t["isitma"], 2)
-                df.at[idx, col_g3_a] = acik3
-            else:
-                # Seçenek 2: Toplam tek kalem Gider1
-                df.at[idx, col_g1_t] = round(t["toplam"], 2)
-                df.at[idx, col_g1_a] = acik1
-                # diğerlerini boş bırak
-            filled += 1
-
-        df.drop(columns=["_DaireID_"], inplace=True)
-
-        st.success(f"{filled} satır dolduruldu.")
+    if ("Blok" not in df.columns) or ("Daire No" not in df.columns):
+        # Debug için kullanıcıya göstermek üzere ilk 5 satır/sütun
+        st.error("Excel’de 'Blok' ve 'Daire No' sütunları bulunamadı.")
         st.dataframe(df.head(10))
+        raise ValueError("Apsiyon şablonunda 'Blok' / 'Daire No' başlıkları tespit edilemedi.")
 
-        # 5) Excel olarak indir
-        out = io.BytesIO()
-        try:
-            # openpyxl (önerilir)
-            with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Sayfa1")
-        except Exception:
-            # xlsxwriter ile deneyelim
-            with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Sayfa1")
-        st.download_button("📥 Doldurulmuş Excel (xlsx)", out.getvalue(), file_name="Apsiyon-doldurulmus.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return df
+
+def fill_expenses_to_apsiyon(
+    df_in: pd.DataFrame,
+    totals: dict,
+    mode: str,
+    exp1: str,
+    exp2: str,
+    exp3: str,
+) -> pd.DataFrame:
+    """
+    totals: {'A1-001': {'isitma':..., 'sicak':..., 'su':..., 'toplam':...}, ...}
+    mode:
+      - "Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)"
+      - "Seçenek 2 (G1=Toplam, G2/G3 boş)"
+    """
+    df = df_in.copy()
+
+    def make_did(blok, dno) -> str:
+        b = str(blok).strip().upper()
+        d = _pad3(dno)
+        return f"{b}-{d}"
+
+    g1t, g1a = "Gider1 Tutarı", "Gider1 Açıklaması"
+    g2t, g2a = "Gider2 Tutarı", "Gider2 Açıklaması"
+    g3t, g3a = "Gider3 Tutarı", "Gider3 Açıklaması"
+
+    # Dolum
+    for idx, row in df.iterrows():
+        blok = row.get("Blok", "")
+        dno  = row.get("Daire No", "")
+        did  = make_did(blok, dno)
+
+        if did in totals:
+            t = totals[did]
+            if mode.startswith("Seçenek 1"):
+                # G1 = Sıcak Su, G2 = Su, G3 = Isıtma
+                df.at[idx, g1t] = t.get("sicak", 0.0)
+                df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = t.get("su", 0.0)
+                df.at[idx, g2a] = exp2 or ""
+                df.at[idx, g3t] = t.get("isitma", 0.0)
+                df.at[idx, g3a] = exp3 or ""
+            else:
+                # Seçenek 2: G1 = Toplam, G2/G3 boş
+                df.at[idx, g1t] = t.get("toplam", 0.0)
+                df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None
+                df.at[idx, g2a] = None
+                df.at[idx, g3t] = None
+                df.at[idx, g3a] = None
+        else:
+            # eşleşmeyen daireleri boş bırak
+            pass
+
+    return df
+
+def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xlsx") -> bytes:
+    bio = BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Sheet1")
+    return bio.getvalue()
+
+# ---------- Streamlit UI entegrasyonu ----------
+st.subheader("📊 Apsiyon Gider Doldurucu")
+apsiyon_file = st.file_uploader("Apsiyon 'boş şablon' Excel dosyasını yükle (.xlsx)", type=["xlsx"], key="apsiyon_up")
+
+colM1, colM2 = st.columns(2)
+with colM1:
+    aps_mode = st.radio(
+        "Doldurma Şekli",
+        ["Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)", "Seçenek 2 (G1=Toplam, G2/G3 boş)"],
+        index=0
+    )
+with colM2:
+    exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su")
+    exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su")
+    exp3 = st.text_input("Gider3 Açıklaması", value="Isıtma")
+
+go_fill = st.button("📥 PDF’ten tutarları çek ve Excel’e yaz")
+
+if go_fill:
+    if not pdf_file:
+        st.warning("Önce üstte fatura PDF’sini yükleyin (aynı PDF).")
+        st.stop()
+    if not apsiyon_file:
+        st.warning("Apsiyon Excel şablonunu yükleyin.")
+        st.stop()
+
+    # 1) PDF'ten tutarları parse et (önceden tanımlı parse_manas_pdf_totals fonksiyonunu kullanıyoruz)
+    totals_map = parse_manas_pdf_totals(pdf_file.read())
+    if not totals_map:
+        st.error("PDF’ten tutar okunamadı. (Daire başlıkları veya tutarlar bulunamadı)")
+        st.stop()
+
+    # 2) Excel’i oku (başlığı otomatik bul, kolonları eşle)
+    try:
+        df_aps = load_apsiyon_template(apsiyon_file.read())
+    except Exception as e:
+        st.error(f"Excel okunamadı: {e}")
+        st.stop()
+
+    # 3) Doldur
+    df_out = fill_expenses_to_apsiyon(df_aps, totals_map, aps_mode, exp1, exp2, exp3)
+
+    # 4) İndir
+    out_bytes = export_excel_bytes(df_out)
+    st.success("Excel dolduruldu.")
+    st.download_button("📥 Doldurulmuş Apsiyon Excel", out_bytes, file_name="Apsiyon_Doldurulmus.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
