@@ -1,263 +1,250 @@
 import streamlit as st
-import os, io, tempfile, zipfile, re, textwrap
-from typing import Tuple, Optional, List
-
-from pypdf import PdfReader, PdfWriter, PageObject
+import io, zipfile
+from typing import List
+from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.pagesizes import A4
 
-# ---- Sabitler / Font Kurulumu ----
-FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-FONT_REG = "NotoSans-Regular"
-FONT_BOLD = "NotoSans-Bold"
-FONT_ITALIC = "NotoSans-Italic"
-FONT_BOLDITALIC = "NotoSans-BoldItalic"
+# (Opsiyonel) .docx'ten alt yazı çekmek için
+try:
+    import docx  # python-docx
+    HAS_DOCX = True
+except Exception:
+    HAS_DOCX = False
 
-def _register_fonts_once():
-    """ReportLab font kayıtlarını tek sefer yap."""
-    for name, file in [
-        (FONT_REG, "NotoSans-Regular.ttf"),
-        (FONT_BOLD, "NotoSans-Bold.ttf"),
-        (FONT_ITALIC, "NotoSans-Italic.ttf"),
-        (FONT_BOLDITALIC, "NotoSans-BoldItalic.ttf"),
-    ]:
-        path = os.path.join(FONTS_DIR, file)
-        if name not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont(name, path))
+# ---------- FONT KAYITLARI (Türkçe) ----------
+# Repo'da fonts/NotoSans-Regular.ttf ve fonts/NotoSans-Bold.ttf olmalı
+pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
+pdfmetrics.registerFont(TTFont("NotoSans-Bold",    "fonts/NotoSans-Bold.ttf"))
 
-_register_fonts_once()
-
-PAGE_W, PAGE_H = A4  # (595.27, 841.89)
-
-# ---- Yardımcılar ----
-def wrap_text(text: str, max_chars: int) -> List[str]:
-    """Metni Türkçe karakterleri koruyarak satırlara böl."""
+# ---------- METİN SARMA (piksel/genişlik ile) ----------
+def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
+    """
+    Satırları, gerçek yazı genişliğine göre kelime kelime sarar.
+    Boş satırları korur; çok uzun tek kelimeyi de parçalar.
+    """
     lines = []
-    for raw_line in text.replace("\r", "").split("\n"):
-        chunks = textwrap.wrap(raw_line, width=max_chars, break_long_words=False, replace_whitespace=False)
-        if not chunks:
-            lines.append("")  # boş satır
-        else:
-            lines.extend(chunks)
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not raw.strip():
+            lines.append("")
+            continue
+        words = raw.split()
+        current = ""
+        for w in words:
+            trial = (current + " " + w).strip()
+            width = pdfmetrics.stringWidth(trial, font_name, font_size)
+            if width <= max_width:
+                current = trial
+            else:
+                if current:
+                    lines.append(current)
+                # tek kelimenin kendisi bile sığmıyorsa harf harf böl
+                if pdfmetrics.stringWidth(w, font_name, font_size) > max_width:
+                    piece = ""
+                    for ch in w:
+                        if pdfmetrics.stringWidth(piece + ch, font_name, font_size) <= max_width:
+                            piece += ch
+                        else:
+                            lines.append(piece)
+                            piece = ch
+                    current = piece
+                else:
+                    current = w
+        lines.append(current)
     return lines
 
-def draw_footer_overlay(text: str, fontsize: int, bold: bool, margin: Tuple[int, int]) -> bytes:
-    """Alt yazı için tek sayfalık saydam overlay PDF (A4)."""
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    fontname = FONT_BOLD if bold else FONT_REG
-    c.setFont(fontname, fontsize)
-
-    left_margin, bottom_margin = margin
-    # Çok satırlı metin
-    lines = wrap_text(text, max_chars=120 if fontsize <= 10 else 95 if fontsize <= 12 else 80)
-    y = bottom_margin
-    line_height = fontsize * 1.35
-
-    for line in lines:
-        c.drawString(left_margin, y, line)
-        y += line_height
-
-    c.save()
-    buf.seek(0)
-    return buf.read()
-
-def draw_corner_label(text: str, fontsize: int, bold: bool, position: str = "TR", padding: Tuple[int, int]=(20, 20)) -> bytes:
+# ---------- ALT YAZI OVERLAY OLUŞTUR ----------
+def build_footer_overlay(
+    page_w: float,
+    page_h: float,
+    footer_text: str,
+    font_size: int = 11,
+    leading: int = 14,
+    align: str = "left",  # "left" | "center"
+    bottom_margin: int = 48,
+    box_height: int = 180,
+    bold_rules: bool = True,
+):
     """
-    Köşe etiketi (ör: daire numarası) için saydam overlay PDF (A4).
-    position: "TL", "TR", "BL", "BR"
-    padding: kenarlardan (x,y) px boşluk
+    Sayfa altına çok satırlı alt yazı overlay'i üretir (BytesIO döner).
+    Satır sırası KORUNUR. Taşma olursa box yüksekliği kadar basılır.
     """
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    fontname = FONT_BOLD if bold else FONT_REG
-    c.setFont(fontname, fontsize)
+    packet = io.BytesIO()
+    can = canvas.Canvas(packet, pagesize=(page_w, page_h))
 
-    padding_x, padding_y = padding
-    text_width = pdfmetrics.stringWidth(text, fontname, fontsize)
-    text_height = fontsize * 1.2
+    # Yazı alanı genişliği (soldan-sağa)
+    left_margin = 36
+    right_margin = 36
+    max_text_width = page_w - left_margin - right_margin
 
-    x, y = padding_x, PAGE_H - padding_y - text_height
-    if position == "TR":
-        x = PAGE_W - padding_x - text_width
-        y = PAGE_H - padding_y - text_height
-    elif position == "BL":
-        x = padding_x
-        y = padding_y
-    elif position == "BR":
-        x = PAGE_W - padding_x - text_width
-        y = padding_y
-    # TL default
+    # Metni uygun genişliğe göre sar
+    wrapped = wrap_by_width(footer_text, "NotoSans-Regular", font_size, max_text_width)
 
-    c.drawString(x, y, text)
-    c.save()
-    buf.seek(0)
-    return buf.read()
+    # Sığacak maksimum satır
+    max_lines = max(1, int(box_height // leading))
+    if len(wrapped) > max_lines:
+        wrapped = wrapped[:max_lines]
 
-def merge_page_with_overlay(page: PageObject, overlay_pdf_bytes: bytes) -> PageObject:
-    """Tek sayfalık overlay PDF'i mevcut sayfaya birleştir."""
-    ov_reader = PdfReader(io.BytesIO(overlay_pdf_bytes))
-    ov_page = ov_reader.pages[0]
-    page.merge_page(ov_page)  # pypdf 4.x
-    return page
+    # Üst satırın başlangıç Y pozisyonu (alta yakın kutu içinde yukarıdan aşağı yazacağız)
+    y_start = bottom_margin + (len(wrapped) - 1) * leading + 4  # küçük nefes payı
 
-# ---- Daire ID Algılama ----
-DAIRE_PATTERNS = [
-    # ÖR: "Daire No  A1-blk daire:01"
-    re.compile(r"Daire\s*No\s*([A-Z]\d)-blk\s*daire[:\s]*(\d{1,3})", re.IGNORECASE),
-    # Ek varyasyonlar istersek buraya eklenir
-]
+    # Satır satır yaz
+    for i, line in enumerate(wrapped):
+        # Kalınlaştırma kuralları
+        use_bold = False
+        if bold_rules:
+            u = line.strip().upper()
+            if i == 0 and u.startswith("SON ÖDEME"):  # 1. satır "SON ÖDEME..." ise kalın
+                use_bold = True
+            if u == "AÇIKLAMA":
+                use_bold = True
+            if "TARİHLİ TEMSİLCİLER" in u:
+                use_bold = True
 
-def extract_daire_id_from_text(text: str) -> Optional[str]:
-    """Sayfa text'inden A1-001 gibi daireID üret."""
-    t = " ".join(text.split())  # whitespace sadeleştir
-    for pat in DAIRE_PATTERNS:
-        m = pat.search(t)
-        if m:
-            blk = m.group(1).upper()
-            num = int(m.group(2))
-            return f"{blk}-{num:03d}"
-    return None
+        can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
 
-# ---- Uygulama UI ----
-st.set_page_config(page_title="Vadi Fatura Bölücü ve Kişiselleştirici", page_icon="📄", layout="centered")
+        y = y_start - i * leading
+        if align == "center":
+            # ortalı
+            can.drawCentredString(page_w / 2.0, y, line)
+        else:
+            # sola hizalı
+            can.drawString(left_margin, y, line)
 
-st.title("Vadi Fatura Bölücü ve Kişiselleştirici")
+    can.save()
+    packet.seek(0)
+    return packet
 
-pdf_file = st.file_uploader("Fatura PDF dosyasını yükleyin", type=["pdf"])
-footer_text = st.text_area(
-    "Alt yazı (her sayfanın altına eklenecek)",
-    value="Atlas Vadi Sitesi Yönetimi – İletişim: 0 (532) 000 0000",
-    height=120
+def add_footer_to_pdf(src_bytes: bytes, **kw) -> bytes:
+    reader = PdfReader(io.BytesIO(src_bytes))
+    writer = PdfWriter()
+    for page in reader.pages:
+        w = float(page.mediabox.width)
+        h = float(page.mediabox.height)
+        overlay_io = build_footer_overlay(w, h, **kw)
+        overlay = PdfReader(overlay_io)
+        page.merge_page(overlay.pages[0])
+        writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+def split_pdf(src_bytes: bytes):
+    reader = PdfReader(io.BytesIO(src_bytes))
+    pages = []
+    for i, p in enumerate(reader.pages, start=1):
+        w = PdfWriter()
+        w.add_page(p)
+        b = io.BytesIO()
+        w.write(b)
+        pages.append((f"page_{i:03d}.pdf", b.getvalue()))
+    return pages
+
+# ---------- STREAMLIT UI ----------
+st.set_page_config(page_title="Fatura Bölücü • Atlas Vadi", page_icon="🧾", layout="centered")
+st.title("📄 Fatura • Böl & Alt Yazı Ekle")
+
+pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"])
+
+st.subheader("Alt Yazı Kaynağı")
+tab1, tab2 = st.tabs(["✍️ Metin alanı", "📄 .docx yükle (opsiyonel)"])
+
+default_text = (
+    "SON ÖDEME TARİHİ     24.10.2025\n\n"
+    "Manas paylaşımlarında oturumda olup (0) gelen dairelerin önceki ödediği paylaşım tutarları baz alınarak "
+    "bedel yansıtılması; ayrıca İSKİ su sayacının okuduğu harcama tutarı ile site içerisindeki harcama tutarı "
+    "arasındaki farkın İSKİ faturasının ödenebilmesi için 152 daireye eşit olarak yansıtılması oya sunuldu. "
+    "Oybirliği ile kabul edildi.\n\n"
+    "28.02.2017 TARİHLİ TEMSİLCİLER OLAĞAN TOPLANTISINDA ALINAN KARARA İSTİNADEN\n"
+    "AÇIKLAMA\n"
+    "İski saatinden okunan m3 = 1.319  M3\n"
+    "Manas okuması m3= 1.202,5 M3\n"
+    "Ortak alan tüketimler m3= 32  M3 \n"
+    "Açıkta kalan:  84,5 m3     \n"
+    "Su m3 fiyatı 82,09   TL    84,5*82,9 = 7.005,05 TL / 152 = 46,08 TL."
 )
 
-with st.expander("Alt yazı / Görsel ayarlar", expanded=False):
-    col1, col2, col3 = st.columns(3)
-    footer_on = col1.checkbox("Alt yazıyı uygula", value=True)
-    footer_font_size = int(col2.slider("Alt yazı punto", min_value=8, max_value=16, value=11, step=1))
-    footer_bold = col3.checkbox("Alt yazı kalın", value=False)
-    footer_left = int(st.number_input("Alt yazı sol boşluk (px)", min_value=0, max_value=100, value=36, step=2))
-    footer_bottom = int(st.number_input("Alt yazı alt boşluk (px)", min_value=0, max_value=100, value=28, step=2))
+with tab1:
+    footer_text = st.text_area("Alt yazı", value=default_text, height=220)
 
-with st.expander("Daire numarası etiketi", expanded=True):
-    stamp_on = st.checkbox("Daire numarasını köşeye yaz", value=True)
-    colp1, colp2, colp3 = st.columns(3)
-    stamp_font = int(colp1.slider("Etiket punto", min_value=10, max_value=20, value=13, step=1))
-    stamp_bold = colp2.checkbox("Etiket kalın", value=True)
-    pos = colp3.selectbox("Konum", options=["TR", "TL", "BR", "BL"], index=0)
-    prefix = st.text_input("Etiket metin şablonu", value="Daire: {daire_id}")
-    pad_x = int(st.number_input("Köşe yatay boşluk (px)", min_value=0, max_value=80, value=20, step=2))
-    pad_y = int(st.number_input("Köşe dikey boşluk (px)", min_value=0, max_value=80, value=20, step=2))
-
-colA, colB = st.columns(2)
-only_split = colA.radio("Çıktı tipi", ["Alt yazı uygula + böl", "Sadece böl", "Alt yazı uygula + tek PDF"], index=0)
-go = colB.button("İşle ve indir")
-
-# ---- İş Akışı ----
-def process_pdf(input_bytes: bytes) -> Tuple[bytes, List[Tuple[str, bytes]]]:
-    """
-    Girdi PDF'yi sayfalara böl; (opsiyonel) her sayfaya footer ve daire etiketi uygula.
-    Dönüş:
-      - tek PDF bytes (tüm sayfalar birleştirilmiş)
-      - [(dosya adı, bytes)] sayfalara bölünmüş liste
-    """
-    reader = PdfReader(io.BytesIO(input_bytes))
-    single_writer = PdfWriter()
-    split_pages: List[Tuple[str, bytes]] = []
-
-    # Hazır overlay'ler (performans için bir kez üretilecek)
-    footer_overlay = None
-    if footer_on and footer_text.strip():
-        footer_overlay = draw_footer_overlay(
-            footer_text.strip(),
-            fontsize=footer_font_size,
-            bold=footer_bold,
-            margin=(footer_left, footer_bottom)
-        )
-
-    for idx, page in enumerate(reader.pages, start=1):
-        # Daire ID çıkar
-        daire_id = None
+with tab2:
+    if not HAS_DOCX:
+        st.info("python-docx yüklü değilse .docx modu devre dışı olur. requirements.txt içinde `python-docx==1.1.2` olduğundan emin olun.")
+    docx_file = st.file_uploader(".docx yükleyin (opsiyonel)", type=["docx"], key="docx_up")
+    if docx_file and HAS_DOCX:
         try:
-            txt = page.extract_text() or ""
-            daire_id = extract_daire_id_from_text(txt)
-        except Exception:
-            daire_id = None
+            d = docx.Document(docx_file)
+            paragraphs = [p.text for p in d.paragraphs]
+            docx_text = "\n".join(paragraphs).strip()
+            if docx_text:
+                footer_text = docx_text
+                st.success("Alt yazı .docx içeriğinden alındı.")
+        except Exception as e:
+            st.error(f".docx okunamadı: {e}")
 
-        # Çalışma kopyası
-        page_mod = PageObject.create_blank_page(width=page.mediabox.right, height=page.mediabox.top)
-        page_mod.merge_page(page)
+st.subheader("Görünüm Ayarları")
+c1, c2 = st.columns(2)
+with c1:
+    font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, 11)
+    leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14)
+with c2:
+    align     = st.radio("Hizalama", ["left", "center"], index=0, format_func=lambda x: "Sol" if x=="left" else "Orta")
+    bottom_m  = st.slider("Alt Marj (pt)", 24, 100, 48)
+box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, 180)
+bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True)
 
-        # Daire etiketi
-        if stamp_on and daire_id:
-            label_txt = prefix.format(daire_id=daire_id)
-            overlay = draw_corner_label(label_txt, fontsize=stamp_font, bold=stamp_bold, position=pos, padding=(pad_x, pad_y))
-            page_mod = merge_page_with_overlay(page_mod, overlay)
-
-        # Footer
-        if footer_overlay:
-            page_mod = merge_page_with_overlay(page_mod, footer_overlay)
-
-        # Tek PDF için ekle
-        single_writer.add_page(page_mod)
-
-        # Tek tek dosyalar için yaz
-        w = PdfWriter()
-        w.add_page(page_mod)
-        out_bytes = io.BytesIO()
-        w.write(out_bytes)
-        out_bytes.seek(0)
-
-        # Dosya adı
-        base_name = f"page_{idx:03d}.pdf"
-        if daire_id:
-            base_name = f"{daire_id}.pdf"
-        split_pages.append((base_name, out_bytes.read()))
-
-    # Tek PDF
-    single_buf = io.BytesIO()
-    single_writer.write(single_buf)
-    single_buf.seek(0)
-    return single_buf.read(), split_pages
+st.subheader("İşlem")
+mode = st.radio(
+    "Ne yapmak istersiniz?",
+    ["Sadece sayfalara böl", "Sadece alt yazı uygula (tek PDF)", "Alt yazı uygula + sayfalara böl (ZIP)"],
+    index=2
+)
+go = st.button("🚀 Başlat")
 
 if go:
     if not pdf_file:
         st.warning("Lütfen önce bir PDF yükleyin.")
+        st.stop()
+
+    src = pdf_file.read()
+
+    if mode == "Sadece sayfalara böl":
+        pages = split_pdf(src)
+        with io.BytesIO() as zbuf:
+            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+                for name, data in pages:
+                    z.writestr(name, data)
+            st.download_button("📥 Bölünmüş sayfalar (ZIP)", zbuf.getvalue(), file_name="bolunmus_sayfalar.zip")
+
+    elif mode == "Sadece alt yazı uygula (tek PDF)":
+        stamped = add_footer_to_pdf(
+            src,
+            footer_text=footer_text,
+            font_size=font_size,
+            leading=leading,
+            align=align,
+            bottom_margin=bottom_m,
+            box_height=box_h,
+            bold_rules=bold_rules,
+        )
+        st.download_button("📥 Alt yazılı PDF", stamped, file_name="alt_yazili.pdf")
+
     else:
-        with st.spinner("İşleniyor…"):
-            all_pdf, split_files = process_pdf(pdf_file.read())
-
-        # Çıktılar
-        if only_split == "Alt yazı uygula + tek PDF":
-            st.download_button("Tek PDF indir", data=all_pdf, file_name="fatura_islenmis.pdf", mime="application/pdf")
-        elif only_split == "Sadece böl":
-            # yalnızca böl (footer ve etiket ayarları kapalı kabul edilir)
-            # Ancak kullanıcı footer/etiket açık bırakmış olabilir.
-            # Bu durumda yeniden sadece böl yapalım:
-            # Basit yol: split_files zaten işlenmiş, fakat kullanıcı “sadece böl” dediği için
-            # footer/etiketsiz bir tur daha yapıyoruz.
-            reader = PdfReader(io.BytesIO(pdf_file.getvalue()))
-            zbuf = io.BytesIO()
+        stamped = add_footer_to_pdf(
+            src,
+            footer_text=footer_text,
+            font_size=font_size,
+            leading=leading,
+            align=align,
+            bottom_margin=bottom_m,
+            box_height=box_h,
+            bold_rules=bold_rules,
+        )
+        pages = split_pdf(stamped)
+        with io.BytesIO() as zbuf:
             with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for idx, page in enumerate(reader.pages, start=1):
-                    w = PdfWriter()
-                    w.add_page(page)
-                    outb = io.BytesIO()
-                    w.write(outb)
-                    outb.seek(0)
-                    z.writestr(f"page_{idx:03d}.pdf", outb.read())
-            zbuf.seek(0)
-            st.download_button("Bölünmüş PDF’ler (ZIP)", data=zbuf.getvalue(), file_name="bolunmus_pdfler.zip", mime="application/zip")
-        else:
-            # Alt yazı uygula + böl
-            zbuf = io.BytesIO()
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for fname, data in split_files:
-                    z.writestr(fname, data)
-            zbuf.seek(0)
-            st.download_button("Bölünmüş PDF’ler (ZIP)", data=zbuf.getvalue(), file_name="bolunmus_pdfler.zip", mime="application/zip")
-
-# Alt bilgi
-st.caption("© Atlas Vadi – PDF yardımcı aracı")
+                for name, data in pages:
+                    z.writestr(name, data)
+            st.download_button("📥 Alt yazılı & bölünmüş (ZIP)", zbuf.getvalue(), file_name="alt_yazili_bolunmus.zip")
