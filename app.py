@@ -5,6 +5,17 @@ from typing import List, Dict
 import streamlit as st
 import pandas as pd
 
+if "settings" not in st.session_state:
+    st.session_state["settings"] = {
+        "font_size": 11,
+        "leading": 14,
+        "bottom_m": 48,
+        "box_h": 180,
+        "align": "left",
+        "exp1": "Sıcak Su",
+        "exp2": "Soğuk Su",
+        "exp3": "Isıtma",
+    }
 # PDF
 from pypdf import PdfReader, PdfWriter
 
@@ -323,12 +334,12 @@ with tab_a:
     st.subheader("Görünüm Ayarları")
     c1, c2 = st.columns(2)
     with c1:
-        font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, 11, key="fs")
-        leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14, key="lead")
+        font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, st.session_state["settings"]["font_size"])
+        leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, st.session_state["settings"]["leading"])
     with c2:
-        align     = st.radio("Hizalama", ["left", "center"], index=0, key="align", format_func=lambda x: "Sol" if x=="left" else "Orta")
-        bottom_m  = st.slider("Alt Marj (pt)", 24, 100, 48, key="bm")
-    box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, 180, key="bh")
+        align     = st.radio("Hizalama", ["left", "center"], index=0 if st.session_state["settings"]["align"]=="left" else 1, format_func=lambda x: "Sol" if x=="left" else "Orta")
+bottom_m  = st.slider("Alt Marj (pt)", 24, 100, st.session_state["settings"]["bottom_m"])
+box_h     = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, st.session_state["settings"]["box_h"])
     bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True, key="boldrules")
 
     st.subheader("İşlem")
@@ -367,7 +378,16 @@ with tab_a:
                 bold_rules=bold_rules,
             )
             st.download_button("📥 Alt yazılı PDF", stamped, file_name="alt_yazili.pdf")
-
+st.session_state["settings"].update({
+    "font_size": font_size,
+    "leading": leading,
+    "bottom_m": bottom_m,
+    "box_h": box_h,
+    "align": align,
+    "exp1": exp1,
+    "exp2": exp2,
+    "exp3": exp3,
+})
         else:
             stamped = add_footer_to_pdf(
                 src,
@@ -560,9 +580,9 @@ with colM1:
         index=0
     )
 with colM2:
-    exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su")
-    exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su")
-    exp3 = st.text_input("Gider3 Açıklaması", value="Isıtma")
+    exp1 = st.text_input("Gider1 Açıklaması", value=st.session_state["settings"]["exp1"])
+    exp2 = st.text_input("Gider2 Açıklaması", value=st.session_state["settings"]["exp2"])
+    exp3 = st.text_input("Gider3 Açıklaması", value=st.session_state["settings"]["exp3"])
 
 go_fill = st.button("📥 PDF’ten tutarları çek ve Excel’e yaz")
 
