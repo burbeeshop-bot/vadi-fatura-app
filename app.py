@@ -174,48 +174,102 @@ def split_pdf(src_bytes: bytes):
 def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
     """
     Dönüş:
-    {
-      'A1-001': {'isitma': x, 'sicak': y, 'su': z, 'toplam': t},
-      ...
-    }
+      {'A1-001': {'isitma': x, 'sicak': y, 'su': z, 'toplam': t}, ...}
     """
     reader = PdfReader(io.BytesIO(pdf_bytes))
     result: Dict[str, Dict[str, float]] = {}
 
-    # DAIRE NO : A1-blk daire:01 gibi esnek yazımlar
-    re_daire = re.compile(r"DAIRE NO[^A-Z0-9]{0,10}([A-Z]\d)[^0-9]{0,10}(\d{1,4})")
+    # --- esnek Daire No yakalama desenleri ---
+    # Not: Birini normalize (DAIRE) üzerinde, birini ham metin üzerinde deneyeceğiz.
+    re_daire_norms = [
+        # "DAIRE NO : A1 ... 01"
+        re.compile(r"DAIRE\s*NO[^A-Z0-9]{0,15}([A-Z]\d)[^0-9]{0,20}(\d{1,4})"),
+        # "A1 BLK DAIRE 01" veya "A1-BLK DAIRE:01"
+        re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DAIRE[^0-9]{0,10}(\d{1,4})"),
+    ]
+    re_daire_raws = [
+        # ham metinde Türkçe "DAİRE NO"
+        re.compile(r"DA[İI]RE\s*NO[^A-Z0-9]{0,15}([A-Z]\d)[^0-9]{0,20}(\d{1,4})"),
+        re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DA[İI]RE[^0-9]{0,10}(\d{1,4})"),
+    ]
 
-    def grab(section: str, norm_text: str) -> float:
-        # <SECTION> ... ODENECEK TUTAR <tutar>
-        pat = re.compile(rf"{section}\b.*?ODENECEK TUTAR\s*([0-9\.\,]+)", re.DOTALL)
-        m = pat.search(norm_text)
+    # Ödenecek tutar yakalama (TL ve iki nokta/boşluk varyantları)
+    re_odenecek = re.compile(
+        r"(?:ÖDENECEK|ODENECEK)\s*TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE
+    )
+    re_toplam = re.compile(r"TOPLAM\s+TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
+
+    def find_daire_id(raw_text: str) -> str | None:
+        norm = _normalize_tr(raw_text)
+        # önce normalize üzerinde dene
+        for rx in re_daire_norms:
+            m = rx.search(norm)
+            if m:
+                blok = m.group(1).upper()
+                dno = _pad3(m.group(2))
+                return f"{blok}-{dno}"
+        # sonra ham metinde dene (Türkçe İ/ı olasılığı)
+        for rx in re_daire_raws:
+            m = rx.search(raw_text)
+            if m:
+                blok = m.group(1).upper()
+                dno = _pad3(m.group(2))
+                return f"{blok}-{dno}"
+        return None
+
+    def grab_section_amount(norm_text: str, header_word: str) -> float:
+        """
+        header_word: 'ISITMA' | 'SICAK SU' | 'SU'
+        Başlıktan sonra gelen ilk ÖDENECEK TUTAR'ı alır.
+        """
+        # başlık yerini bul
+        idx = norm_text.find(header_word)
+        if idx == -1:
+            return 0.0
+        tail = norm_text[idx : idx + 2500]  # bölümden sonraki makul pencere
+        m = re_odenecek.search(tail)
         return _to_float_tr(m.group(1)) if m else 0.0
 
-    for page in reader.pages:
-        raw  = page.extract_text() or ""
+    # sayfa sayfa tara
+    for pi, page in enumerate(reader.pages):
+        raw = page.extract_text() or ""
         norm = _normalize_tr(raw)
 
-        # DaireID
-        did = None
-        m = re_daire.search(norm)
-        if m:
-            blok = m.group(1)
-            dno  = _pad3(m.group(2))
-            did  = f"{blok}-{dno}"
+        did = find_daire_id(raw)
         if not did:
+            # ilk sayfada bulunamadıysa debug kolaylığı
+            if pi == 0:
+                st.info("⚠️ Daire No satırı bulunamadı. İlk sayfanın normalize edilmiş içeriğinin bir kısmını gösteriyorum.")
+                st.code(norm[:800])
             continue
 
-        isitma = grab("ISITMA", norm)
-        sicak  = grab("SICAK SU", norm)
-        su     = grab(r"\bSU\b", norm)
+        isitma = grab_section_amount(norm, "ISITMA")
+        sicak  = grab_section_amount(norm, "SICAK SU")
 
-        m_tot = re.search(r"TOPLAM TUTAR\s*([0-9\.\,]+)", norm)
-        toplam = _to_float_tr(m_tot.group(1)) if m_tot else (isitma + sicak + su)
+        # "SU" başlığı "SICAK SU" ile karışmasın diye, önce ' SICAK SU ' yakalandığından emin olduk.
+        # Saf 'SU' için ayrı yaklaşım: ' SICAK SU ' geçtiyse, geriye kalan kısımdan ara.
+        su = 0.0
+        # 'SICAK SU' bölümünün sonrasından dene:
+        idx_sicak = norm.find("SICAK SU")
+        search_base = norm[idx_sicak + 8 :] if idx_sicak != -1 else norm
+        idx_su = search_base.find("\nSU")
+        if idx_su == -1:
+            idx_su = search_base.find(" SU ")
+        if idx_su != -1:
+            tail_su = search_base[idx_su : idx_su + 2000]
+            m_su = re_odenecek.search(tail_su)
+            if m_su:
+                su = _to_float_tr(m_su.group(1))
+        if su == 0.0:
+            # olmadı, genel fallback:
+            su = grab_section_amount(norm, "\nSU")
+
+        mt = re_toplam.search(norm)
+        toplam = _to_float_tr(mt.group(1)) if mt else (isitma + sicak + su)
 
         result[did] = {"isitma": isitma, "sicak": sicak, "su": su, "toplam": toplam}
 
     return result
-
 
 # =========================================================
 #  S T R E A M L I T   U I
