@@ -1,119 +1,112 @@
 import streamlit as st
-import io, zipfile
+import io, zipfile, textwrap
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-st.set_page_config(page_title="Vadi Fatura Bölücü", page_icon="📄", layout="centered")
-st.title("📄 Vadi Fatura Bölücü ve Kişiselleştirici")
-
-# --- Türkçe TTF fontları kaydet ---
-# Repo: fonts/NotoSans-Regular.ttf ve fonts/NotoSans-Bold.ttf
-pdfmetrics.registerFont(TTFont("NotoSans", "fonts/NotoSans-Regular.ttf"))
+# --- Font kayıtları ---
+pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
 pdfmetrics.registerFont(TTFont("NotoSans-Bold", "fonts/NotoSans-Bold.ttf"))
 
-uploaded_file = st.file_uploader("Fatura PDF dosyasını yükleyin", type=["pdf"])
-
-default_footer = (
-    "SON ÖDEME TARİHİ 24.10.2025\n\n"
-    "Manas paylaşımlarında oturumda olup (0) gelen dairelerin önceki ödediği paylaşım tutarları baz alınarak "
-    "bedel yansıtılması; ayrıca İSKİ su sayacının okuduğu harcama tutarı ile site içerisindeki harcama tutarı "
-    "arasındaki farkın İSKİ faturasının ödenebilmesi için 152 daireye eşit olarak yansıtılması oya sunuldu. "
-    "Oybirliği ile kabul edildi.\n\n"
-    "28.02.2017 TARİHLİ TEMSİLCİLER OLAĞAN TOPLANTISINDA ALINAN KARARA İSTİNADEN\n"
-    "AÇIKLAMA\n"
-    "İski saatinden okunan m3 = 1.319 M3\n"
-    "Manas okuması m3= 1.202,5 M3\n"
-    "Ortak alan tüketimler m3= 32 M3\n"
-    "Açıkta kalan: 84,5 m3\n"
-    "Su m3 fiyatı 82,09 TL   84,5*82,9 = 7.005,05 TL / 152 = 46,08 TL."
-)
-
-footer_text = st.text_area(
-    "Alt yazı (çok satır destekli, Türkçe karakterli)",
-    value=default_footer,
-    height=220
-)
-
-option = st.radio(
-    "Ne yapmak istersiniz?",
-    [
-        "Alt yazı uygula ve tek PDF indir",
-        "Sadece sayfalara böl",
-        "Alt yazıyı uygula ve sayfalara böl (ZIP indir)"
-    ],
-    index=2
-)
-
-def draw_multiline_footer(can: canvas.Canvas, text: str, left=40, bottom_margin=40,
-                          leading=14, normal_size=10, bold_size=10.5):
-    """
-    Çok satırlı footer’ı sayfanın alt bölümüne, yukarıdan aşağı DOĞRU sırayla basar.
-    'SON ÖDEME TARİHİ' ve 'AÇIKLAMA' gibi satırları kalın yapar.
-    """
-    lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
-
-    # Kaç satır varsa, üst satırın y’sini hesapla ki alttaki satırlar taşmasın
-    # textLine aşağı doğru ilerlediği için ilk satırı daha yukarıdan başlatıyoruz.
-    y_start = bottom_margin + leading * (len(lines)-1) + 6  # +6 küçük nefes payı
-
-    can.setFont("NotoSans", normal_size)
-    textobj = can.beginText()
-    textobj.setTextOrigin(left, y_start)
-
-    for ln in lines:
-        # Basit bir otomatik bold kuralı (istersen kaldırabilirsin):
-        upper = ln.strip().upper()
-        if upper.startswith("SON ÖDEME TARİHİ") or upper == "AÇIKLAMA" or "TARİHLİ TEMSİLCİLER" in upper:
-            textobj.setFont("NotoSans-Bold", bold_size)
-        else:
-            textobj.setFont("NotoSans", normal_size)
-        textobj.textLine(ln)
-
-    can.drawText(textobj)
-
-def add_footer_to_page(page, footer):
+# --- PDF alt yazısı oluşturucu ---
+def make_footer_overlay(page_width, page_height, footer_text, font_size=11):
     packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=A4)
-    # Çok satırlı, Türkçe karakterli alt yazı
-    draw_multiline_footer(can, footer_text)
-    can.save()
+    c = canvas.Canvas(packet, pagesize=(page_width, page_height))
+
+    left_margin = 36
+    bottom_margin = 48
+    max_width = page_width - 72
+    line_height = font_size + 3
+
+    # Metni satırlara böl (otomatik kaydırma)
+    lines = textwrap.wrap(footer_text, width=int(max_width / (font_size * 0.55)))
+    y = bottom_margin + len(lines) * line_height
+
+    for i, line in enumerate(lines):
+        if i == 0 and line.strip().startswith("SON ÖDEME"):
+            c.setFont("NotoSans-Bold", font_size)
+        else:
+            c.setFont("NotoSans-Regular", font_size)
+        c.drawString(left_margin, y - i * line_height, line)
+
+    c.save()
     packet.seek(0)
-    overlay = PdfReader(packet)
-    page.merge_page(overlay.pages[0])
-    return page
+    return packet
 
-if uploaded_file:
-    reader = PdfReader(uploaded_file)
+# --- Alt yazıyı PDF'e uygula ---
+def add_footer_to_pdf(pdf_bytes, footer_text, font_size=11):
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
 
-    if option == "Alt yazı uygula ve tek PDF indir":
+    for page in reader.pages:
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        overlay = PdfReader(make_footer_overlay(width, height, footer_text, font_size))
+        page.merge_page(overlay.pages[0])
+        writer.add_page(page)
+
+    output = io.BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+# --- PDF'i sayfalara böl ---
+def split_pdf(pdf_bytes):
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    result = []
+    for i, page in enumerate(reader.pages, start=1):
         writer = PdfWriter()
-        for page in reader.pages:
-            writer.add_page(add_footer_to_page(page, footer_text))
-        buff = io.BytesIO()
-        writer.write(buff)
-        st.download_button("📥 Alt yazılı tek PDF indir", buff.getvalue(), "fatura_alt_yazili.pdf")
+        writer.add_page(page)
+        page_buf = io.BytesIO()
+        writer.write(page_buf)
+        result.append((f"page_{i:03}.pdf", page_buf.getvalue()))
+    return result
 
-    elif option == "Sadece sayfalara böl":
-        zbuf = io.BytesIO()
-        with zipfile.ZipFile(zbuf, "w") as z:
-            for i, page in enumerate(reader.pages, start=1):
-                w = PdfWriter()
-                w.add_page(page)
-                b = io.BytesIO(); w.write(b)
-                z.writestr(f"page_{i:03d}.pdf", b.getvalue())
-        st.download_button("📂 Sayfalara bölünmüş ZIP indir", zbuf.getvalue(), "fatura_sayfalara_bolunmus.zip")
+# --- Streamlit Arayüzü ---
+st.set_page_config(page_title="Vadi Fatura Uygulaması", page_icon="🧾")
 
-    else:  # Alt yazıyı uygula ve sayfalara böl (ZIP)
-        zbuf = io.BytesIO()
-        with zipfile.ZipFile(zbuf, "w") as z:
-            for i, page in enumerate(reader.pages, start=1):
-                w = PdfWriter()
-                w.add_page(add_footer_to_page(page, footer_text))
-                b = io.BytesIO(); w.write(b)
-                z.writestr(f"fatura_{i:03d}.pdf", b.getvalue())
-        st.download_button("📦 Alt yazılı ve bölünmüş ZIP indir", zbuf.getvalue(), "fatura_alt_yazili_bolunmus.zip")
-else:
-    st.info("Lütfen önce bir PDF yükleyin.")
+st.title("📄 Vadi Fatura Bölücü + Alt Yazı Uygulayıcı")
+st.markdown("PDF’leri sayfalara bölebilir, altına açıklama ekleyebilir veya ikisini birden yapabilirsiniz.")
+
+uploaded = st.file_uploader("PDF dosyasını yükle", type=["pdf"])
+footer_text = st.text_area(
+    "Alt Yazı (çok satırlı destekli, Türkçe uyumlu)",
+    value="SON ÖDEME TARİHİ     24.10.2025\n\nAtlas Vadi Sitesi Yönetimi",
+    height=200
+)
+font_size = st.slider("🅰️ Yazı Boyutu", 8, 20, 11)
+mode = st.radio("İşlem Türü", [
+    "Sadece sayfalara böl",
+    "Sadece alt yazı uygula (tek PDF indir)",
+    "Alt yazı uygula + sayfalara böl"
+])
+run = st.button("🚀 İşlemi Başlat")
+
+if run:
+    if not uploaded:
+        st.warning("Lütfen bir PDF yükleyin.")
+        st.stop()
+
+    pdf_bytes = uploaded.read()
+
+    if mode == "Sadece sayfalara böl":
+        pages = split_pdf(pdf_bytes)
+        with io.BytesIO() as z:
+            with zipfile.ZipFile(z, "w") as zf:
+                for name, data in pages:
+                    zf.writestr(name, data)
+            st.download_button("📥 ZIP olarak indir", z.getvalue(), file_name="bolunmus_sayfalar.zip")
+
+    elif mode == "Sadece alt yazı uygula (tek PDF indir)":
+        output = add_footer_to_pdf(pdf_bytes, footer_text, font_size)
+        st.download_button("📥 Alt Yazılı PDF İndir", output, file_name="altyazili.pdf")
+
+    else:
+        stamped = add_footer_to_pdf(pdf_bytes, footer_text, font_size)
+        pages = split_pdf(stamped)
+        with io.BytesIO() as z:
+            with zipfile.ZipFile(z, "w") as zf:
+                for name, data in pages:
+                    zf.writestr(name, data)
+            st.download_button("📥 Alt Yazılı ve Bölünmüş (ZIP) İndir", z.getvalue(), file_name="altyazili_bolunmus.zip")
