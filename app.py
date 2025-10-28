@@ -9,7 +9,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.pagesizes import A4
 
-# (opsiyonel) docx'ten alt yazı çekmek için
+# (opsiyonel) .docx'ten alt yazı çekmek için
 try:
     import docx
     HAS_DOCX = True
@@ -37,7 +37,6 @@ def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float)
                 current = trial
             else:
                 if current: lines.append(current)
-                # kelimenin kendisi bile sığmıyorsa harf harf böl
                 if pdfmetrics.stringWidth(w, font_name, font_size) > max_width:
                     piece = ""
                     for ch in w:
@@ -73,10 +72,8 @@ def build_footer_overlay(page_w: float, page_h: float, footer_text: str,
             if "TARİHLİ TEMSİLCİLER" in u: use_bold = True
         can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
         y = y_start - i*leading
-        if align == "center":
-            can.drawCentredString(page_w/2.0, y, line)
-        else:
-            can.drawString(left_margin, y, line)
+        if align == "center": can.drawCentredString(page_w/2.0, y, line)
+        else:                 can.drawString(left_margin, y, line)
     can.save(); packet.seek(0)
     return packet
 
@@ -114,31 +111,45 @@ def _pad3(n: str) -> str:
 
 def parse_manas_pdf_totals(pdf_bytes: bytes) -> dict:
     """
-    Manas PDF içinden daire bazlı: {'A1-001': {'isitma': x, 'sicak': y, 'su': z}, ...}
+    {'A1-001': {'isitma': x, 'sicak': y, 'su': z, 'toplam': t}, ...}
     """
     reader = PdfReader(io.BytesIO(pdf_bytes))
     result = {}
 
-    re_daire = re.compile(r"Daire\s*No\s*([A-Z]\d)\s*-\s*blk\s*daire\s*[:：]\s*(\d+)", re.IGNORECASE)
-    re_odenecek = re.compile(r"Ödenecek\s*Tutar\s*([\d\.\,]+)")
+    # Daire No örnekleri:
+    # "Daire No : A1-blk daire:01"  veya  "Daire No : A1 blk daire : 01"
+    re_daire_flex = re.compile(
+        r"DAIRE\s*NO\s*[:：]?\s*([A-Z]\d)[^\d\n\r]{0,20}?(\d+)",
+        re.IGNORECASE
+    )
+    re_odenecek = re.compile(r"ÖDENECEK\s*TUTAR\s*([\d\.\,]+)", re.IGNORECASE)
+    re_toplam   = re.compile(r"TOPLAM\s+TUTAR\s*([\d\.\,]+)", re.IGNORECASE)
 
     for page in reader.pages:
         txt = page.extract_text() or ""
-        m = re_daire.search(txt)
-        if not m:
-            m = re.search(r"Daire\s*No\s*([A-Z]\d)\s*blk\s*daire\s*[:：]\s*(\d+)", txt, re.IGNORECASE)
-        if not m:
-            continue
-        blok = m.group(1).upper()
-        dno  = _pad3(m.group(2))
-        did  = f"{blok}-{dno}"
+        up  = txt.upper()
 
-        up = txt.upper(); end = len(up)
+        # DaireID
+        did = None
+        m = re_daire_flex.search(up)
+        if m:
+            blok = m.group(1).upper()
+            dno  = _pad3(m.group(2))
+            did  = f"{blok}-{dno}"
+        if not did:
+            continue
+
+        # Bölüm başlangıç indeksleri
         idx_isitma = up.find("ISITMA")
         idx_sicak  = up.find("SICAK SU")
-        idx_su     = up.find("\nSU") if "\nSU" in up else up.find("SU\n")
-        if idx_su == -1: idx_su = up.find("\nSU\n")
+        # SU başlığı farklı satırlarda olabilir
+        idx_su     = up.find("\nSU")
+        if idx_su == -1: idx_su = up.find("SU\n")
+        if idx_su == -1: idx_su = up.find("\rSU")
+        if idx_su == -1: idx_su = up.find("SU\r")
+        if idx_su == -1: idx_su = up.find(" SU ")
 
+        end = len(up)
         sections = {"ISITMA": None, "SICAK SU": None, "SU": None}
         if idx_isitma != -1:
             end_isitma = min([x for x in [idx_sicak, idx_su, end] if x != -1 and x > idx_isitma] or [end])
@@ -155,11 +166,19 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> dict:
             mo = re_odenecek.search(sec)
             if not mo: continue
             val = _to_float_tr(mo.group(1))
-            if key == "ISITMA": isitma = val
+            if key == "ISITMA":    isitma = val
             elif key == "SICAK SU": sicak = val
-            elif key == "SU": su = val
+            elif key == "SU":       su = val
 
-        result[did] = {"isitma": isitma, "sicak": sicak, "su": su}
+        # TOPLAM TUTAR (varsa)
+        toplam = 0.0
+        mt = re_toplam.search(txt)
+        if mt:
+            toplam = _to_float_tr(mt.group(1))
+        else:
+            toplam = isitma + sicak + su
+
+        result[did] = {"isitma": isitma, "sicak": sicak, "su": su, "toplam": toplam}
 
     return result
 
@@ -286,18 +305,18 @@ with tabs[1]:
     mode2 = st.radio(
         "Giderleri nasıl yazalım?",
         [
-            "Seçenek 1: Gider1 = Isıtma + Sıcak Su, Gider2 = Su, Gider3 = Isıtma",
-            "Seçenek 2: Toplam (Isıtma + Sıcak Su + Su) sadece Gider1'e"
+            "Seçenek 1: Gider1 = Sıcak Su, Gider2 = Su, Gider3 = Isıtma",
+            "Seçenek 2: Toplam Tutar sadece Gider1'e"
         ],
         index=0
     )
     if mode2.startswith("Seçenek 1"):
-        g1_acik = st.text_input("Gider1 Açıklaması (Isıtma + Sıcak Su)", value="Isıtma + Sıcak Su")
-        g2_acik = st.text_input("Gider2 Açıklaması (Su)",               value="Soğuk Su")
-        g3_acik = st.text_input("Gider3 Açıklaması (Isıtma)",           value="Isıtma")
+        g1_acik = st.text_input("Gider1 Açıklaması (Sıcak Su)", value="Sıcak Su")
+        g2_acik = st.text_input("Gider2 Açıklaması (Su)",       value="Soğuk Su")
+        g3_acik = st.text_input("Gider3 Açıklaması (Isıtma)",   value="Isıtma")
         single_desc = None
     else:
-        single_desc = st.text_input("Gider1 Açıklaması (Toplam)", value="Isıtma + Sıcak Su + Su (Toplam)")
+        single_desc = st.text_input("Gider1 Açıklaması (Toplam Tutar)", value="Toplam Tutar")
         g1_acik = g2_acik = g3_acik = None
 
     col_g1_tutar = st.text_input("Gider1 Tutarı sütun adı", value="Gider1 Tutarı")
@@ -336,19 +355,18 @@ with tabs[1]:
             did = row_id(r)
             if not did or did not in totals: continue
             t = totals[did]
-            isitma = t.get("isitma", 0.0); sicak = t.get("sicak", 0.0); su = t.get("su", 0.0)
+            isitma = t.get("isitma", 0.0); sicak = t.get("sicak", 0.0); su = t.get("su", 0.0); toplam = t.get("toplam", 0.0)
 
             if mode.startswith("Seçenek 1"):
-                g1 = (isitma + sicak); g2 = su; g3 = isitma
-                out.at[idx, col_g1_tutar] = f"{g1:.2f}".replace(".", ",")
-                out.at[idx, col_g2_tutar] = f"{g2:.2f}".replace(".", ",")
-                out.at[idx, col_g3_tutar] = f"{g3:.2f}".replace(".", ",")
+                # G1=Sıcak Su, G2=Su, G3=Isıtma
+                out.at[idx, col_g1_tutar] = f"{sicak:.2f}".replace(".", ",")
+                out.at[idx, col_g2_tutar] = f"{su:.2f}".replace(".", ",")
+                out.at[idx, col_g3_tutar] = f"{isitma:.2f}".replace(".", ",")
                 out.at[idx, col_g1_acik]  = g1_acik or ""
                 out.at[idx, col_g2_acik]  = g2_acik or ""
                 out.at[idx, col_g3_acik]  = g3_acik or ""
             else:
-                tot = (isitma + sicak + su)
-                out.at[idx, col_g1_tutar] = f"{tot:.2f}".replace(".", ",")
+                out.at[idx, col_g1_tutar] = f"{toplam:.2f}".replace(".", ",")
                 out.at[idx, col_g1_acik]  = single_desc or ""
                 out.at[idx, col_g2_tutar] = ""; out.at[idx, col_g2_acik] = ""
                 out.at[idx, col_g3_tutar] = ""; out.at[idx, col_g3_acik] = ""
