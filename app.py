@@ -144,7 +144,7 @@ def split_pdf(src_bytes: bytes):
 
 # ---------- STREAMLIT UI ----------
 st.set_page_config(page_title="Fatura Bölücü • Atlas Vadi", page_icon="🧾", layout="centered")
-st.title("📄 Vadi Fatura • Böl & Alt Yazı Ekle")
+st.title("📄 Fatura • Böl & Alt Yazı Ekle")
 
 pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"])
 
