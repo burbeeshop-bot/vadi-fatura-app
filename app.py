@@ -1,398 +1,272 @@
-import streamlit as st
-import io, zipfile, re
-from typing import List, Tuple, Optional
+# =========================
+# A P S İ Y O N   M O D Ü L Ü
+# =========================
+import re
 
-from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.pagesizes import A4
+st.header("📊 Apsiyon Gider Doldurucu (PDF → Apsiyon boş şablon)")
 
-# (Opsiyonel) .docx'ten alt yazı çekmek için
-try:
-    import docx  # python-docx
-    HAS_DOCX = True
-except Exception:
-    HAS_DOCX = False
+with st.expander("1) Dosyaları yükle", expanded=True):
+    apsiyon_xlsx = st.file_uploader("Apsiyon boş şablon (Excel)", type=["xlsx", "xls"])
+    manas_pdf    = st.file_uploader("Manas PDF (çok sayfalı, daire bazlı)", type=["pdf"], key="manaspdf_for_aps")
 
-# ---------- FONT KAYITLARI (Türkçe) ----------
-# Repo'da fonts/NotoSans-Regular.ttf ve fonts/NotoSans-Bold.ttf olmalı
-pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
-pdfmetrics.registerFont(TTFont("NotoSans-Bold",    "fonts/NotoSans-Bold.ttf"))
+with st.expander("2) Eşleşme Ayarları (Daire)", expanded=True):
+    st.caption("Şablonda daire alanı hangi formatta?")
+    id_mode = st.radio(
+        "Daire kimliği seçimi",
+        ["Blok + Daire No sütunları var", "Tek sütunda DaireID (örn. A1-001) var"],
+        index=0
+    )
+    if id_mode == "Blok + Daire No sütunları var":
+        col_b = st.text_input("Blok sütun adı", value="Blok")
+        col_d = st.text_input("Daire No sütun adı", value="Daire No")
+        single_id_col = None
+    else:
+        single_id_col = st.text_input("DaireID / Daire sütun adı", value="DaireID")
+        col_b, col_d = None, None
 
-PAGE_W, PAGE_H = A4  # (595.27, 841.89)
+with st.expander("3) Yazım Modu (Gider kolonları)", expanded=True):
+    mode = st.radio(
+        "Giderleri nasıl yazalım?",
+        [
+            "Seçenek 1: Gider1 = Isıtma + Sıcak Su, Gider2 = Su, Gider3 = Isıtma",
+            "Seçenek 2: Toplam (Isıtma + Sıcak Su + Su) sadece Gider1'e"
+        ],
+        index=0
+    )
 
-# ---------- METİN SARMA (piksel/genişlik ile) ----------
-def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
+    if mode.startswith("Seçenek 1"):
+        g1_acik = st.text_input("Gider1 Açıklaması (Isıtma + Sıcak Su)", value="Isıtma + Sıcak Su")
+        g2_acik = st.text_input("Gider2 Açıklaması (Su)",               value="Soğuk Su")
+        g3_acik = st.text_input("Gider3 Açıklaması (Isıtma)",           value="Isıtma")
+        single_desc = None
+    else:
+        single_desc = st.text_input("Gider1 Açıklaması (Toplam)", value="Isıtma + Sıcak Su + Su (Toplam)")
+        g1_acik = g2_acik = g3_acik = None
+
+    # Hedef kolon adları (şablonda bire bir bu isimlerle olmalı; yoksa otomatik ekleriz)
+    col_g1_tutar = st.text_input("Gider1 Tutarı sütun adı", value="Gider1 Tutarı")
+    col_g1_acik  = st.text_input("Gider1 Açıklaması sütun adı", value="Gider1 Açıklaması")
+    col_g2_tutar = st.text_input("Gider2 Tutarı sütun adı", value="Gider2 Tutarı")
+    col_g2_acik  = st.text_input("Gider2 Açıklaması sütun adı", value="Gider2 Açıklaması")
+    col_g3_tutar = st.text_input("Gider3 Tutarı sütun adı", value="Gider3 Tutarı")
+    col_g3_acik  = st.text_input("Gider3 Açıklaması sütun adı", value="Gider3 Açıklaması")
+
+def _to_float_tr(s: str) -> float:
+    """'1.234,56' → 1234.56  ;  '0,00' → 0.0  ;  '—' → 0.0"""
+    if not s or not isinstance(s, str):
+        return 0.0
+    s = s.strip().replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except:
+        return 0.0
+
+def _pad3(n: str) -> str:
+    try:
+        return f"{int(n):03d}"
+    except:
+        return str(n)
+
+def parse_manas_pdf_totals(pdf_bytes: bytes) -> dict:
     """
-    Satırları, gerçek yazı genişliğine göre kelime kelime sarar.
-    Boş satırları korur; çok uzun tek kelimeyi de parçalar.
+    Her daire için { 'A1-001': {'isitma': x, 'sicak': y, 'su': z} } döner.
+    PDF sayfa metinlerine göre regex ile çeker.
     """
-    lines = []
-    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if not raw.strip():
-            lines.append("")
-            continue
-        words = raw.split()
-        current = ""
-        for w in words:
-            trial = (current + " " + w).strip()
-            width = pdfmetrics.stringWidth(trial, font_name, font_size)
-            if width <= max_width:
-                current = trial
-            else:
-                if current:
-                    lines.append(current)
-                # tek kelimenin kendisi bile sığmıyorsa harf harf böl
-                if pdfmetrics.stringWidth(w, font_name, font_size) > max_width:
-                    piece = ""
-                    for ch in w:
-                        if pdfmetrics.stringWidth(piece + ch, font_name, font_size) <= max_width:
-                            piece += ch
-                        else:
-                            lines.append(piece)
-                            piece = ch
-                    current = piece
-                else:
-                    current = w
-        lines.append(current)
-    return lines
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    result = {}
 
-# ---------- ALT YAZI OVERLAY OLUŞTUR ----------
-def build_footer_overlay(
-    page_w: float,
-    page_h: float,
-    footer_text: str,
-    font_size: int = 11,
-    leading: int = 14,
-    align: str = "left",  # "left" | "center"
-    bottom_margin: int = 48,
-    box_height: int = 180,
-    bold_rules: bool = True,
-):
-    """
-    Sayfa altına çok satırlı alt yazı overlay'i üretir (BytesIO döner).
-    Satır sırası KORUNUR. Taşma olursa box yüksekliği kadar basılır.
-    """
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=(page_w, page_h))
+    # Daire No yakala: "Daire No  A1-blk daire:01"
+    re_daire = re.compile(r"Daire\s*No\s*([A-Z]\d)\s*-\s*blk\s*daire\s*:\s*(\d+)", re.IGNORECASE)
 
-    # Yazı alanı genişliği (soldan-sağa)
-    left_margin = 36
-    right_margin = 36
-    max_text_width = page_w - left_margin - right_margin
+    # Bölüm başlıkları ve ilgili "Ödenecek Tutar" değerleri
+    # Her bölüm için 'Ödenecek Tutar <rakam>' ararız.
+    re_odenecek = re.compile(r"Ödenecek\s*Tutar\s*([\d\.\,]+)")
 
-    # Metni uygun genişliğe göre sar
-    wrapped = wrap_by_width(footer_text, "NotoSans-Regular", font_size, max_text_width)
-
-    # Sığacak maksimum satır
-    max_lines = max(1, int(box_height // leading))
-    if len(wrapped) > max_lines:
-        wrapped = wrapped[:max_lines]
-
-    # Üst satırın başlangıç Y pozisyonu (alta yakın kutu içinde yukarıdan aşağı yazacağız)
-    y_start = bottom_margin + (len(wrapped) - 1) * leading + 4  # küçük nefes payı
-
-    # Satır satır yaz
-    for i, line in enumerate(wrapped):
-        # Kalınlaştırma kuralları
-        use_bold = False
-        if bold_rules:
-            u = line.strip().upper()
-            if i == 0 and u.startswith("SON ÖDEME"):  # 1. satır "SON ÖDEME..." ise kalın
-                use_bold = True
-            if u == "AÇIKLAMA":
-                use_bold = True
-            if "TARİHLİ TEMSİLCİLER" in u:
-                use_bold = True
-
-        can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
-
-        y = y_start - i * leading
-        if align == "center":
-            # ortalı
-            can.drawCentredString(page_w / 2.0, y, line)
-        else:
-            # sola hizalı
-            can.drawString(left_margin, y, line)
-
-    can.save()
-    packet.seek(0)
-    return packet
-
-def add_footer_to_pdf(src_bytes: bytes, **kw) -> bytes:
-    reader = PdfReader(io.BytesIO(src_bytes))
-    writer = PdfWriter()
     for page in reader.pages:
-        w = float(page.mediabox.width)
-        h = float(page.mediabox.height)
-        overlay_io = build_footer_overlay(w, h, **kw)
-        overlay = PdfReader(overlay_io)
-        page.merge_page(overlay.pages[0])
-        writer.add_page(page)
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
+        txt = page.extract_text() or ""
+        # Daire bilgisi
+        m = re_daire.search(txt.replace("-", "-").replace("–", "-"))
+        if not m:
+            # Bazı PDF'lerde 'A1-blk' ile 'A1 - blk' arasında farklı boşluk/çizgi olabilir, biraz gevşetelim:
+            m = re.search(r"Daire\s*No\s*([A-Z]\d)\s*-\s*blk\s*daire\s*[:：]\s*(\d+)", txt, re.IGNORECASE)
+        if not m:
+            # Son çare: 'A1 blk daire:01' (tire düşmüş)
+            m = re.search(r"Daire\s*No\s*([A-Z]\d)\s*blk\s*daire\s*[:：]\s*(\d+)", txt, re.IGNORECASE)
 
-def split_pdf(src_bytes: bytes):
-    reader = PdfReader(io.BytesIO(src_bytes))
-    pages = []
-    for i, p in enumerate(reader.pages, start=1):
-        w = PdfWriter()
-        w.add_page(p)
-        b = io.BytesIO()
-        w.write(b)
-        pages.append((f"page_{i:03d}.pdf", b.getvalue()))
-    return pages
+        if not m:
+            # Daire bulunamadıysa bu sayfayı atla
+            continue
 
-# ---------- (YENİ) DAİRE NO ALGILAMA & KÖŞE ETİKETİ ----------
-# Manas formatı ör.: "Daire No  A1-blk daire:01"
-DAIRE_PATTERNS = [
-    re.compile(r"Daire\s*No\s*([A-Z]\d)-blk\s*daire[:\s]*(\d{1,3})", re.IGNORECASE),
-]
+        blok = m.group(1).upper()     # A1, A2, ...
+        dno  = _pad3(m.group(2))      # 01 -> 001
+        daire_id = f"{blok}-{dno}"
 
-def extract_daire_id_from_text(text: str) -> Optional[str]:
-    t = " ".join((text or "").split())
-    for pat in DAIRE_PATTERNS:
-        m = pat.search(t)
-        if m:
-            blk = m.group(1).upper()
-            num = int(m.group(2))
-            return f"{blk}-{num:03d}"
-    return None
+        # Varsayılanlar
+        isitma = sicak = su = 0.0
 
-def build_corner_label_overlay(
-    page_w: float, page_h: float, label_text: str,
-    font_size: int = 13, bold: bool = True,
-    position: str = "TR", pad_x: int = 20, pad_y: int = 20
-) -> io.BytesIO:
-    """Köşeye (TL/TR/BL/BR) daire etiketi basmak için tek sayfalık overlay üretir."""
-    packet = io.BytesIO()
-    can = canvas.Canvas(packet, pagesize=(page_w, page_h))
-    font_name = "NotoSans-Bold" if bold else "NotoSans-Regular"
-    can.setFont(font_name, font_size)
-    text_w = pdfmetrics.stringWidth(label_text, font_name, font_size)
-    text_h = font_size * 1.2
+        # Sayfa içini bölümlere yaklaşık ayıralım
+        sections = {
+            "ISITMA": None,
+            "SICAK SU": None,
+            "SU": None
+        }
 
-    # Koordinatlar
-    if position == "TR":
-        x = page_w - pad_x - text_w
-        y = page_h - pad_y - text_h
-    elif position == "TL":
-        x = pad_x
-        y = page_h - pad_y - text_h
-    elif position == "BR":
-        x = page_w - pad_x - text_w
-        y = pad_y
-    else:  # BL
-        x = pad_x
-        y = pad_y
+        # Bölüm başlıklarının indexlerini bulup metin parçaları çıkaralım
+        up = txt.upper()
+        idx_isitma = up.find("ISITMA")
+        idx_sicak  = up.find("SICAK SU")
+        # 'SU' bölümü 'SICAK SU' metninin altına tekrar 'SU' başlığı şeklinde geliyor
+        idx_su     = up.find("\nSU") if "\nSU" in up else up.find("\rSU")
+        if idx_su == -1:
+            # bazı dokümanlarda 'SU' başlık satırında başta/sonda boşluk olabilir
+            idx_su = up.find("SU\n")
+        # Bölge aralıkları
+        end = len(up)
+        if idx_isitma != -1:
+            end_isitma = min([x for x in [idx_sicak, idx_su, end] if x != -1 and x > idx_isitma] or [end])
+            sections["ISITMA"] = txt[idx_isitma:end_isitma]
+        if idx_sicak != -1:
+            end_sicak = min([x for x in [idx_su, end] if x != -1 and x > idx_sicak] or [end])
+            sections["SICAK SU"] = txt[idx_sicak:end_sicak]
+        if idx_su != -1:
+            sections["SU"] = txt[idx_su:end]
 
-    can.drawString(x, y, label_text)
-    can.save()
-    packet.seek(0)
-    return packet
+        # Her bölümde ilk "Ödenecek Tutar" değerini al
+        for key in sections:
+            if not sections[key]:
+                continue
+            mo = re_odenecek.search(sections[key])
+            if mo:
+                val = _to_float_tr(mo.group(1))
+                if key == "ISITMA":
+                    isitma = val
+                elif key == "SICAK SU":
+                    sicak = val
+                elif key == "SU":
+                    su = val
 
-def add_footer_and_stamp_per_page(
-    src_bytes: bytes,
-    footer_kwargs: dict,
-    stamp_on: bool,
-    label_tpl: str,
-    stamp_opts: dict,
-    rename_files: bool
-) -> List[Tuple[str, bytes]]:
+        result[daire_id] = {"isitma": isitma, "sicak": sicak, "su": su}
+
+    return result
+
+def write_expenses_to_sheet(df: pd.DataFrame,
+                            totals: dict,
+                            id_mode: str,
+                            col_b: Optional[str],
+                            col_d: Optional[str],
+                            single_id_col: Optional[str],
+                            mode: str,
+                            g1_acik: Optional[str], g2_acik: Optional[str], g3_acik: Optional[str],
+                            single_desc: Optional[str],
+                            cols: Tuple[str, str, str, str, str, str]) -> pd.DataFrame:
     """
-    Her sayfayı tek tek işler (footer + opsiyonel etiket) ve sayfa sayfa döner.
-    rename_files=True ise 'A1-001.pdf' gibi adlandırır (yakalanırsa).
+    df: Apsiyon şablonu (hiçbir kolonu/satırı silmeyeceğiz)
+    totals: {'A1-001': {'isitma': x, 'sicak': y, 'su': z}, ...}
     """
-    reader = PdfReader(io.BytesIO(src_bytes))
-    out_pages: List[Tuple[str, bytes]] = []
+    col_g1_tutar, col_g1_acik, col_g2_tutar, col_g2_acik, col_g3_tutar, col_g3_acik = cols
 
-    for i, page in enumerate(reader.pages, start=1):
-        # Başlangıç sayfasını kopyala
-        w = float(page.mediabox.width)
-        h = float(page.mediabox.height)
+    # Gerekli kolonlar yoksa ekle (sıra sonuna)
+    for c in [col_g1_tutar, col_g1_acik, col_g2_tutar, col_g2_acik, col_g3_tutar, col_g3_acik]:
+        if c not in df.columns:
+            df[c] = ""
 
-        # Önce footer
-        footer_overlay_io = build_footer_overlay(w, h, **footer_kwargs)
-        footer_overlay = PdfReader(footer_overlay_io)
-        page.merge_page(footer_overlay.pages[0])
+    def row_id(r) -> Optional[str]:
+        if id_mode == "Blok + Daire No sütunları var":
+            if col_b in r and col_d in r:
+                b = str(r[col_b]).strip().upper()
+                d = _pad3(str(r[col_d]).strip().split(".")[0])  # '1.0' gibi durumlar için
+                if b and d:
+                    return f"{b}-{d}"
+        else:
+            if single_id_col in r:
+                v = str(r[single_id_col]).strip().upper()
+                # A1-1 → A1-001 düzelt
+                m = re.match(r"([A-Z]\d)\-(\d+)$", v)
+                if m:
+                    return f"{m.group(1)}-{_pad3(m.group(2))}"
+                return v
+        return None
 
-        # Daire ID çıkar
-        daire_id = None
-        try:
-            txt = page.extract_text() or ""
-            daire_id = extract_daire_id_from_text(txt)
-        except Exception:
-            daire_id = None
+    # Satır satır doldur
+    out = df.copy()
+    for idx, r in out.iterrows():
+        did = row_id(r)
+        if not did or did not in totals:
+            continue
+        t = totals[did]
+        isitma = t.get("isitma", 0.0)
+        sicak  = t.get("sicak", 0.0)
+        su     = t.get("su", 0.0)
 
-        # Etiket uygula
-        if stamp_on and daire_id:
-            label_text = label_tpl.format(daire_id=daire_id)
-            label_overlay_io = build_corner_label_overlay(
-                w, h, label_text,
-                font_size=stamp_opts.get("font_size", 13),
-                bold=stamp_opts.get("bold", True),
-                position=stamp_opts.get("position", "TR"),
-                pad_x=stamp_opts.get("pad_x", 20),
-                pad_y=stamp_opts.get("pad_y", 20),
-            )
-            label_overlay = PdfReader(label_overlay_io)
-            page.merge_page(label_overlay.pages[0])
+        if mode.startswith("Seçenek 1"):
+            g1 = (isitma + sicak)
+            g2 = su
+            g3 = isitma
 
-        # Tek sayfalık PDF yaz
-        wri = PdfWriter()
-        wri.add_page(page)
-        buf = io.BytesIO()
-        wri.write(buf)
-        buf.seek(0)
+            out.at[idx, col_g1_tutar] = f"{g1:.2f}".replace(".", ",")
+            out.at[idx, col_g2_tutar] = f"{g2:.2f}".replace(".", ",")
+            out.at[idx, col_g3_tutar] = f"{g3:.2f}".replace(".", ",")
 
-        fname = f"page_{i:03d}.pdf"
-        if rename_files and daire_id:
-            fname = f"{daire_id}.pdf"
+            out.at[idx, col_g1_acik]  = g1_acik or ""
+            out.at[idx, col_g2_acik]  = g2_acik or ""
+            out.at[idx, col_g3_acik]  = g3_acik or ""
+        else:
+            tot = (isitma + sicak + su)
+            out.at[idx, col_g1_tutar] = f"{tot:.2f}".replace(".", ",")
+            out.at[idx, col_g1_acik]  = single_desc or ""
+            # Diğerlerini boş bırak
+            out.at[idx, col_g2_tutar] = ""
+            out.at[idx, col_g2_acik]  = ""
+            out.at[idx, col_g3_tutar] = ""
+            out.at[idx, col_g3_acik]  = ""
 
-        out_pages.append((fname, buf.getvalue()))
+    return out
 
-    return out_pages
-
-# ---------- STREAMLIT UI ----------
-st.set_page_config(page_title="Fatura Bölücü • Atlas Vadi", page_icon="🧾", layout="centered")
-st.title("📄 Fatura • Böl & Alt Yazı Ekle")
-
-pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"])
-
-st.subheader("Alt Yazı Kaynağı")
-tab1, tab2 = st.tabs(["✍️ Metin alanı", "📄 .docx yükle (opsiyonel)"])
-
-default_text = (
-    "SON ÖDEME TARİHİ     24.10.2025\n\n"
-    "Manas paylaşımlarında oturumda olup (0) gelen dairelerin önceki ödediği paylaşım tutarları baz alınarak "
-    "bedel yansıtılması; ayrıca İSKİ su sayacının okuduğu harcama tutarı ile site içerisindeki harcama tutarı "
-    "arasındaki farkın İSKİ faturasının ödenebilmesi için 152 daireye eşit olarak yansıtılması oya sunuldu. "
-    "Oybirliği ile kabul edildi.\n\n"
-    "28.02.2017 TARİHLİ TEMSİLCİLER OLAĞAN TOPLANTISINDA ALINAN KARARA İSTİNADEN\n"
-    "AÇIKLAMA\n"
-    "İski saatinden okunan m3 = 1.319  M3\n"
-    "Manas okuması m3= 1.202,5 M3\n"
-    "Ortak alan tüketimler m3= 32  M3 \n"
-    "Açıkta kalan:  84,5 m3     \n"
-    "Su m3 fiyatı 82,09   TL    84,5*82,9 = 7.005,05 TL / 152 = 46,08 TL."
-)
-
-with tab1:
-    footer_text = st.text_area("Alt yazı", value=default_text, height=220)
-
-with tab2:
-    if not HAS_DOCX:
-        st.info("python-docx yüklü değilse .docx modu devre dışı olur. requirements.txt içinde `python-docx==1.1.2` olduğundan emin olun.")
-    docx_file = st.file_uploader(".docx yükleyin (opsiyonel)", type=["docx"], key="docx_up")
-    if docx_file and HAS_DOCX:
-        try:
-            d = docx.Document(docx_file)
-            paragraphs = [p.text for p in d.paragraphs]
-            docx_text = "\n".join(paragraphs).strip()
-            if docx_text:
-                footer_text = docx_text
-                st.success("Alt yazı .docx içeriğinden alındı.")
-        except Exception as e:
-            st.error(f".docx okunamadı: {e}")
-
-st.subheader("Görünüm Ayarları")
-c1, c2 = st.columns(2)
-with c1:
-    font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, 11)
-    leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14)
-with c2:
-    align     = st.radio("Hizalama", ["left", "center"], index=0, format_func=lambda x: "Sol" if x=="left" else "Orta")
-    bottom_m  = st.slider("Alt Marj (pt)", 24, 100, 48)
-box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, 180)
-bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True)
-
-# --- (YENİ) DAİRE ETİKETİ SEÇENEKLERİ (opsiyonel) ---
-with st.expander("🏷️ Daire numarası etiketi (opsiyonel)", expanded=False):
-    stamp_on = st.checkbox("Daire numarasını köşeye yaz", value=False)
-    label_tpl = st.text_input("Etiket şablonu", value="Daire: {daire_id}")
-    c3, c4, c5 = st.columns(3)
-    with c3:
-        stamp_font_size = st.slider("Etiket punto", 10, 20, 13)
-    with c4:
-        stamp_pos = st.selectbox("Konum", ["TR", "TL", "BR", "BL"], index=0)
-    with c5:
-        stamp_bold = st.checkbox("Kalın", value=True)
-    c6, c7 = st.columns(2)
-    with c6:
-        pad_x = st.slider("Köşe yatay boşluk (px)", 0, 80, 20, step=2)
-    with c7:
-        pad_y = st.slider("Köşe dikey boşluk (px)", 0, 80, 20, step=2)
-    rename_files = st.checkbox("Bölünmüş dosya adını daireID.pdf yap", value=True)
-
-st.subheader("İşlem")
-mode = st.radio(
-    "Ne yapmak istersiniz?",
-    ["Sadece sayfalara böl", "Sadece alt yazı uygula (tek PDF)", "Alt yazı uygula + sayfalara böl (ZIP)"],
-    index=2
-)
-go = st.button("🚀 Başlat")
+st.divider()
+go = st.button("🚀 Apsiyon dosyasını doldur ve indir")
 
 if go:
-    if not pdf_file:
-        st.warning("Lütfen önce bir PDF yükleyin.")
+    if not apsiyon_xlsx or not manas_pdf:
+        st.error("Lütfen hem **Apsiyon şablonu** hem de **Manas PDF** dosyasını yükleyin.")
         st.stop()
 
-    src = pdf_file.read()
+    try:
+        df_in = pd.read_excel(apsiyon_xlsx)
+    except Exception as e:
+        st.error(f"Apsiyon dosyası okunamadı: {e}")
+        st.stop()
 
-    if mode == "Sadece sayfalara böl":
-        # Orijinal davranış: hiçbir ek işlem yok
-        pages = split_pdf(src)
-        with io.BytesIO() as zbuf:
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for name, data in pages:
-                    z.writestr(name, data)
-            st.download_button("📥 Bölünmüş sayfalar (ZIP)", zbuf.getvalue(), file_name="bolunmus_sayfalar.zip")
+    # Manas PDF'ini parse et
+    totals = parse_manas_pdf_totals(manas_pdf.read())
 
-    elif mode == "Sadece alt yazı uygula (tek PDF)":
-        stamped = add_footer_to_pdf(
-            src,
-            footer_text=footer_text,
-            font_size=font_size,
-            leading=leading,
-            align=align,
-            bottom_margin=bottom_m,
-            box_height=box_h,
-            bold_rules=bold_rules,
-        )
-        st.download_button("📥 Alt yazılı PDF", stamped, file_name="alt_yazili.pdf")
+    if not totals:
+        st.warning("PDF’den hiçbir daire verisi çıkmadı. PDF yapısını kontrol edin.")
+        st.stop()
 
-    else:
-        # Alt yazı + (opsiyonel) daire etiketi + böl
-        footer_kwargs = dict(
-            footer_text=footer_text,
-            font_size=font_size,
-            leading=leading,
-            align=align,
-            bottom_margin=bottom_m,
-            box_height=box_h,
-            bold_rules=bold_rules,
-        )
-        stamp_opts = dict(
-            font_size=stamp_font_size,
-            bold=stamp_bold,
-            position=stamp_pos,
-            pad_x=pad_x,
-            pad_y=pad_y,
-        )
+    # Doldur
+    df_out = write_expenses_to_sheet(
+        df_in, totals, id_mode,
+        col_b, col_d, single_id_col,
+        mode, g1_acik, g2_acik, g3_acik, single_desc,
+        (col_g1_tutar, col_g1_acik, col_g2_tutar, col_g2_acik, col_g3_tutar, col_g3_acik)
+    )
 
-        pages = add_footer_and_stamp_per_page(
-            src_bytes=src,
-            footer_kwargs=footer_kwargs,
-            stamp_on=stamp_on,
-            label_tpl=label_tpl,
-            stamp_opts=stamp_opts,
-            rename_files=rename_files,
-        )
+    # Ön izleme
+    st.success("Tamam! Aşağıda ilk 15 satır önizleme:")
+    st.dataframe(df_out.head(15))
 
-        with io.BytesIO() as zbuf:
-            with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
-                for name, data in pages:
-                    z.writestr(name, data)
-            st.download_button("📥 Alt yazılı & bölünmüş (ZIP)", zbuf.getvalue(), file_name="alt_yazili_bolunmus.zip")
+    # XLSX indirme (openpyxl varsa)
+    xbuf = io.BytesIO()
+    wrote_xlsx = False
+    try:
+        with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
+            df_out.to_excel(writer, index=False)
+        wrote_xlsx = True
+    except Exception as e:
+        st.info(f"Excel yazıcı (openpyxl) bulunamadı veya hata aldı ({e}). CSV olarak da indirebilirsiniz.")
+
+    if wrote_xlsx:
+        st.download_button("📥 Apsiyon (doldurulmuş).xlsx", xbuf.getvalue(), file_name="Apsiyon_doldurulmus.xlsx")
+    # CSV yedeği
+    csv_bytes = df_out.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("📥 Apsiyon (doldurulmuş).csv", csv_bytes, file_name="Apsiyon_doldurulmus.csv")
