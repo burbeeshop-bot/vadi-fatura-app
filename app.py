@@ -592,58 +592,85 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]].copy()
     return out
 
-# -----------------------------------------------------------------------------
-# Google Drive (Service Account) Helpers + Tanı
-# -----------------------------------------------------------------------------
-_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+# ---------------- Drive Helpers (sağlamlaştırılmış) ----------------
+from googleapiclient.errors import HttpError
 
-def _load_sa_from_secrets() -> dict:
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError("Streamlit secrets içinde 'gcp_service_account' bulunamadı.")
-    return dict(st.secrets["gcp_service_account"])
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 @st.cache_resource(show_spinner=False)
 def _drive_service():
-    sa_dict = _load_sa_from_secrets()
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("Streamlit secrets içinde 'gcp_service_account' bulunamadı.")
+    sa_dict = dict(st.secrets["gcp_service_account"])
     credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
+def drive_check_folder_access(folder_id: str) -> dict:
+    """Folder ID servis hesabı tarafından görülebiliyor mu? (Paylaşılan Sürücü desteğiyle kontrol)"""
+    srv = _drive_service()
+    try:
+        meta = srv.files().get(
+            fileId=folder_id,
+            fields="id,name,driveId,owners,permissions",
+            supportsAllDrives=True,
+        ).execute()
+        return meta
+    except HttpError as e:
+        st.error(f"📂 Klasör ID erişilemedi: {e}")
+        st.info("➜ Bu klasörü servis hesabı e-postasıyla **Editor** olarak paylaşman gerekiyor.")
+        raise
+
 def drive_ensure_folder(folder_name: str) -> str:
+    """Servis hesabının kendi Drive’ında klasör bul/oluştur (My Drive)."""
     srv = _drive_service()
     q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    res = srv.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
+    res = srv.files().list(
+        q=q, spaces="drive", fields="files(id,name)", pageSize=10,
+        supportsAllDrives=True
+    ).execute()
     files = res.get("files", [])
     if files:
         return files[0]["id"]
     file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
-    folder = srv.files().create(body=file_meta, fields="id").execute()
+    folder = srv.files().create(
+        body=file_meta, fields="id",
+        supportsAllDrives=True
+    ).execute()
     return folder["id"]
 
-def drive_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_id: str) -> dict:
+def drive_upload_bytes_to_folder(data: bytes, original_name: str, parent_folder_id: str, mime: str) -> dict:
+    """Verilen byte içeriğini klasöre yükle (dosya adı UUID; tahmin edilemez)."""
     srv = _drive_service()
-    ext = os.path.splitext(original_name)[1] or ".pdf"
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
-    file_meta = {"name": safe_name, "parents": [parent_folder_id]}
-    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink,parents").execute()
-    return f
+    ext = os.path.splitext(original_name)[1] or ""
+    safe_name = f"{uuid.uuid4().hex}{ext or ''}"
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+    try:
+        # Erişim doğrulaması — fail fast
+        drive_check_folder_access(parent_folder_id)
+        f = srv.files().create(
+            body={"name": safe_name, "parents": [parent_folder_id]},
+            media_body=media,
+            fields="id,name,webViewLink,webContentLink",
+            supportsAllDrives=True
+        ).execute()
+        return f
+    except HttpError as e:
+        # Parent klasör erişim hatasında anlamlı mesaj ver
+        if getattr(e, "status_code", None) == 404 or "File not found" in str(e):
+            st.error("❌ Yükleme başarısız: Klasör ID servis hesabına **paylaşılmamış** ya da **yanlış**.")
+            st.info("➜ Klasörü servis hesabı e-postasıyla **Editor** olarak paylaş; sonra tekrar dene.")
+        else:
+            st.error(f"Drive API hatası: {e}")
+        raise
 
 def drive_share_anyone_reader(file_id: str) -> None:
+    """Dosyayı linki olan görüntüleyebilir yap."""
     srv = _drive_service()
     perm = {"type": "anyone", "role": "reader"}
     try:
         srv.permissions().create(fileId=file_id, body=perm, fields="id").execute()
     except Exception:
         pass
-
-def drive_get_file(file_id: str) -> dict:
-    srv = _drive_service()
-    return srv.files().get(fileId=file_id, fields="id,name,parents,webViewLink,webContentLink").execute()
-
-def drive_check_folder_access(folder_id: str) -> dict:
-    srv = _drive_service()
-    return srv.files().get(fileId=folder_id, fields="id,name,mimeType,permissions,owners,parents").execute()
-
 # -----------------------------------------------------------------------------
 # UI — 4 Sekme (Tanı paneli eklendi)
 # -----------------------------------------------------------------------------
