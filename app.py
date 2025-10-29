@@ -947,3 +947,68 @@ with tab_c:
             )
             st.info("WhatsApp şablonunda **URL butonu** kullan: CSV’deki `file_url` alanını butona bağla. "
                     "Drive/CDN kullanıyorsan, paylaşımları 'linki olan herkes görüntüleyebilir' yapmayı unutma.")
+
+        st.markdown("### 🔐 Güvenli paylaşım: Dosyaları servis hesabı Drive’ına yükle")
+        with st.expander("Drive’a yükle ve tekil paylaşım linki üret (önerilen)", expanded=False):
+            dcol1, dcol2 = st.columns([2,1])
+            with dcol1:
+                drive_folder_name = st.text_input("Klasör adı", value="AtlasVadi_Faturalar")
+            with dcol2:
+                upload_btn = st.button("☁️ Drive’a yükle ve linkleri yaz", use_container_width=True)
+
+            if upload_btn:
+                if not zip_up:
+                    st.warning("Önce ZIP yükleyin.")
+                    st.stop()
+
+                # 1) Klasörü hazırla
+                with st.spinner("Drive klasörü hazırlanıyor..."):
+                    folder_id = drive_ensure_folder(drive_folder_name)
+
+                # 2) ZIP içindeki PDF’leri tek tek yükle
+                zf = zipfile.ZipFile(zip_up)
+                uploaded_map = {}  # file_name -> link
+                progress = st.progress(0)
+                total_pdf = sum(1 for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf"))
+                done = 0
+
+                for info in zf.infolist():
+                    if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
+                        continue
+                    base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
+                    data = zf.read(info)
+                    bio = io.BytesIO(data)
+                    # Yükle
+                    meta = drive_upload_pdf(bio, base, folder_id)
+                    # Paylaş
+                    drive_share_anyone_reader(meta["id"])
+                    # En sağlam link: webViewLink (Google Drive görüntüleme sayfası)
+                    link = meta.get("webViewLink") or meta.get("webContentLink")
+                    uploaded_map[base] = link
+                    done += 1
+                    progress.progress(min(1.0, done / max(1, total_pdf)))
+
+                st.success(f"{done} PDF yüklendi ve paylaşım linkleri alındı.")
+
+                # 3) merged tablosuna linkleri yaz (file_name eşleşmesiyle)
+                if "file_url" not in merged.columns:
+                    merged["file_url"] = ""
+                merged["file_url"] = merged.apply(
+                    lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1
+                )
+
+                # 4) Güncellenmiş önizleme & indirme
+                st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                             use_container_width=True, height=700)
+
+                out_csv = merged.rename(columns={
+                    "Telefon": "phone",
+                    "Ad Soyad / Unvan": "name",
+                    "DaireID": "daire_id",
+                    "file_name": "file_name",
+                    "file_url": "file_url",
+                })[["phone","name","daire_id","file_name","file_url"]]
+                b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("📥 WhatsApp_Recipients.csv (güncel, Drive linkli)", b_csv,
+                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
+                st.info("Artık her daire yalnız **kendi linkini** görür. Klasör herkese açılmadı; sadece tekil dosyalar paylaşıldı.")
