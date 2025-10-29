@@ -1,4 +1,48 @@
 # app.py
+# ============== Google Drive (Service Account) ==============
+import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+@st.cache_resource(show_spinner=False)
+def _drive_service():
+    # Streamlit Secrets'tan servis hesabı bilgilerini al
+    sa_dict = dict(st.secrets["gcp_service_account"])
+    credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+def drive_ensure_folder(folder_name: str) -> str:
+    """Servis hesabının Drive'ında adı `folder_name` olan klasörü bulur; yoksa oluşturur. Folder ID döner."""
+    srv = _drive_service()
+    q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    res = srv.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
+    files = res.get("files", [])
+    if files:
+        return files[0]["id"]
+    file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
+    folder = srv.files().create(body=file_meta, fields="id").execute()
+    return folder["id"]
+
+def drive_upload_pdf(bytes_io: io.BytesIO, filename: str, parent_folder_id: str) -> dict:
+    """PDF’i klasöre yükler, dosya meta bilgisini döner (id, name, webViewLink, webContentLink)."""
+    srv = _drive_service()
+    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
+    file_meta = {"name": filename, "parents": [parent_folder_id]}
+    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink").execute()
+    return f
+
+def drive_share_anyone_reader(file_id: str) -> None:
+    """Dosyayı 'linki olan görüntüleyebilir' yapar (sadece dosya özelinde)."""
+    srv = _drive_service()
+    perm = {"type": "anyone", "role": "reader"}
+    try:
+        srv.permissions().create(fileId=file_id, body=perm, fields="id").execute()
+    except Exception:
+        # izin zaten varsa sessizce geç
+        pass
 # === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp ===
 import io, os, re, zipfile, unicodedata
 from typing import List, Dict, Tuple, Optional
