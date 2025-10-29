@@ -22,6 +22,11 @@ except Exception:
     HAS_DOCX = False
 
 # =========================
+# Streamlit Page Config
+# =========================
+st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
+
+# =========================
 # Fontlar (Türkçe NotoSans)
 # =========================
 pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
@@ -59,6 +64,11 @@ def _normalize_tr(t: str) -> str:
     t = re.sub(r"[ \t]+", " ", t)
     return t
 
+def _norm_colname(s: str) -> str:
+    return (str(s).strip().lower()
+            .replace("\n"," ").replace("\r"," ")
+            .replace(".","").replace("_"," ").replace("-"," "))
+
 # =========================
 # Alt Yazı (wrap & overlay)
 # =========================
@@ -67,29 +77,29 @@ def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float)
     for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if not raw.strip():
             lines.append("")
-            continue
-        words = raw.split()
-        current = ""
-        for w in words:
-            trial = (current + " " + w).strip()
-            width = pdfmetrics.stringWidth(trial, font_name, font_size)
-            if width <= max_width:
-                current = trial
-            else:
-                if current:
-                    lines.append(current)
-                if pdfmetrics.stringWidth(w, font_name, font_size) > max_width:
-                    piece = ""
-                    for ch in w:
-                        if pdfmetrics.stringWidth(piece + ch, font_name, font_size) <= max_width:
-                            piece += ch
-                        else:
-                            lines.append(piece)
-                            piece = ch
-                    current = piece
+        else:
+            words = raw.split()
+            current = ""
+            for w in words:
+                trial = (current + " " + w).strip()
+                width = pdfmetrics.stringWidth(trial, font_name, font_size)
+                if width <= max_width:
+                    current = trial
                 else:
-                    current = w
-        lines.append(current)
+                    if current:
+                        lines.append(current)
+                    if pdfmetrics.stringWidth(w, font_name, font_size) > max_width:
+                        piece = ""
+                        for ch in w:
+                            if pdfmetrics.stringWidth(piece + ch, font_name, font_size) <= max_width:
+                                piece += ch
+                            else:
+                                lines.append(piece)
+                                piece = ch
+                        current = piece
+                    else:
+                        current = w
+            lines.append(current)
     return lines
 
 def build_footer_overlay(
@@ -364,14 +374,11 @@ def _norm_cols(s: str) -> str:
 
 def _pad3_aps(x) -> str:
     try:
-        n = int(str(x).strip())
-        return f"{n:03d}"
+        n = int(str(x).strip());  return f"{n:03d}"
     except:
         s = str(x).strip()
         nums = "".join([ch for ch in s if ch.isdigit()])
-        if nums:
-            return f"{int(nums):03d}"
-        return s
+        return f"{int(nums):03d}" if nums else s
 
 def _find_header_row(df_raw: pd.DataFrame) -> Optional[int]:
     limit = min(15, len(df_raw))
@@ -403,11 +410,7 @@ def _rename_apsiyon_cols(df: pd.DataFrame) -> pd.DataFrame:
         elif "gider3 açıklaması" in nc or "gider 3 aciklamasi" in nc or "gider3 aciklamasi" in nc:
             mapping[c] = "Gider3 Açıklaması"
     df2 = df.rename(columns=mapping)
-    for col in [
-        "Gider1 Tutarı", "Gider1 Açıklaması",
-        "Gider2 Tutarı", "Gider2 Açıklaması",
-        "Gider3 Tutarı", "Gider3 Açıklaması",
-    ]:
+    for col in ["Gider1 Tutarı","Gider1 Açıklaması","Gider2 Tutarı","Gider2 Açıklaması","Gider3 Tutarı","Gider3 Açıklaması"]:
         if col not in df2.columns:
             df2[col] = None
     return df2
@@ -436,34 +439,25 @@ def fill_expenses_to_apsiyon(
     exp3: str,
 ) -> pd.DataFrame:
     df = df_in.copy()
-
     def make_did(blok, dno) -> str:
         b = str(blok).strip().upper()
         d = _pad3_aps(dno)
         return f"{b}-{d}"
-
     g1t, g1a = "Gider1 Tutarı", "Gider1 Açıklaması"
     g2t, g2a = "Gider2 Tutarı", "Gider2 Açıklaması"
     g3t, g3a = "Gider3 Tutarı", "Gider3 Açıklaması"
-
     for idx, row in df.iterrows():
         did = make_did(row.get("Blok", ""), row.get("Daire No", ""))
         if did in totals:
             t = totals[did]
             if mode.startswith("Seçenek 1"):
-                df.at[idx, g1t] = t.get("sicak", 0.0)
-                df.at[idx, g1a] = exp1 or ""
-                df.at[idx, g2t] = t.get("su", 0.0)
-                df.at[idx, g2a] = exp2 or ""
-                df.at[idx, g3t] = t.get("isitma", 0.0)
-                df.at[idx, g3a] = exp3 or ""
+                df.at[idx, g1t] = t.get("sicak", 0.0); df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = t.get("su", 0.0);    df.at[idx, g2a] = exp2 or ""
+                df.at[idx, g3t] = t.get("isitma", 0.0);df.at[idx, g3a] = exp3 or ""
             else:
-                df.at[idx, g1t] = t.get("toplam", 0.0)
-                df.at[idx, g1a] = exp1 or ""
-                df.at[idx, g2t] = None
-                df.at[idx, g2a] = None
-                df.at[idx, g3t] = None
-                df.at[idx, g3a] = None
+                df.at[idx, g1t] = t.get("toplam", 0.0); df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None; df.at[idx, g2a] = None
+                df.at[idx, g3t] = None; df.at[idx, g3a] = None
     return df
 
 def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xlsx") -> bytes:
@@ -481,7 +475,10 @@ def _norm_rehber(s: str) -> str:
             .replace("\n"," ").replace("\r"," ")
             .replace(".","").replace("_"," ").replace("-"," "))
 
-def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> Optional[int]:
+def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
+    """
+    'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
+    """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
@@ -495,60 +492,107 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> Op
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Apsiyon’dan gelen çeşitli başlık yazımlarını standart isimlere çevirir.
-    Hedef: Blok, Daire No, Ad Soyad / Unvan, Telefon, (opsiyonel: Tel.Tip)
+    Apsiyon’dan gelen başlıkları standart isimlere çevirir:
+    Hedef: Blok, Daire No, Ad Soyad / Unvan (ops), Tel.Tip (ops), Telefon
     """
-    def _n(s: str) -> str:
-        return (str(s).strip().lower()
-                .replace("\n"," ").replace("\r"," ")
-                .replace(".","").replace("_"," ").replace("-"," "))
     mapping = {}
     for c in df.columns:
-        nc = _n(c)
-        if nc in ("blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad"):
+        nc = _norm_rehber(c)
+        if nc in ("blok","blok adi","blok adı","blokadi","blok ad","blokad"):
             mapping[c] = "Blok"
-        elif nc in ("daire no", "daire  no", "daireno", "daire"):
+        elif nc in ("daire no","daire  no","daireno","daire"):
             mapping[c] = "Daire No"
         elif "ad soyad / unvan" in nc or "ad soyad/unvan" in nc or "ad soyad" in nc or "unvan" in nc:
             mapping[c] = "Ad Soyad / Unvan"
-        elif nc in ("tel tip", "tel tipi", "tel tip:", "tel tipi:", "tel tip ", "tel tipi "):
+        elif nc in ("tel tip","tel tipi","tel tip:","tel tipi:","tel tip ","tel tipi "):
             mapping[c] = "Tel.Tip"
-        elif (nc in ("telefon", "tel", "cep", "gsm", "telefon no", "telefon no ", "telefon no:", "tel no", "telefon numarasi", "telefon numarası")
-              or "telefon no" in nc):
+        elif (nc in ("telefon","tel","cep","gsm","telefon no","tel no","telefon numarasi","telefon numarası")) or ("telefon no" in nc):
             mapping[c] = "Telefon"
     return df.rename(columns=mapping)
 
-# ——— Yeni: Unicode normalizasyon + içerik bazlı kolon seçici ———
-def _norm_colname(s: str) -> str:
-    # Türkçe karakterleri sadeleştir + küçük harf + gereksizleri temizle
-    t = unicodedata.normalize("NFKD", str(s))
-    t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    t = (t.replace("ı","i").replace("İ","I")
-           .replace("ş","s").replace("Ş","S")
-           .replace("ö","o").replace("Ö","O")
-           .replace("ü","u").replace("Ü","U")
-           .replace("ğ","g").replace("Ğ","G")
-           .replace("ç","c").replace("Ç","C"))
-    t = t.lower()
-    t = re.sub(r"[\.\-_/]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Apsiyon çıktısını (başta 'Atlas Vadi Sitesi' ve 'Unnamed:' kolonları olsa bile)
+    otomatik başlık satırı tespitiyle okur ve standart kolonlara map eder.
+    Dönen kolonlar en az: Blok, Daire No, Telefon (+ opsiyonel: Ad Soyad / Unvan)
+    """
+    from io import BytesIO
 
-def _pick_col_contains(cols_map: dict, *must_include_any) -> Optional[str]:
-    """
-    Kolon adının normalize hali, verilen anahtar kelimelerden herhangi birini içermeli.
-    Ör: _pick_col_contains(cols_map, "telefon no", "telefon", "tel", "cep", "gsm")
-    """
-    for orig, normed in cols_map.items():
-        for kw in must_include_any:
-            if kw in normed:
-                return orig
-    return None
+    # 1) Ham oku (header=None) ve başlığı bul
+    if filename.lower().endswith(".csv"):
+        raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
+    else:
+        raw = pd.read_excel(BytesIO(file_bytes), header=None, dtype=str, engine="openpyxl")
+
+    hdr = _find_header_row_contacts(raw, search_rows=50)
+    if hdr is None:
+        st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
+        hdr = 0
+
+    # 2) Başlıkla tekrar oku
+    if filename.lower().endswith(".csv"):
+        df = pd.read_csv(BytesIO(file_bytes), header=hdr, dtype=str)
+    else:
+        df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
+
+    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
+    if hdr > 0:
+        upper = raw.iloc[hdr-1]
+        new_cols = []
+        for i, c in enumerate(df.columns):
+            name = str(c)
+            if name.lower().startswith("unnamed"):
+                alt = upper[i] if i < len(upper) else None
+                if pd.notna(alt) and str(alt).strip():
+                    name = str(alt)
+                else:
+                    name = f"Kolon_{i+1}"
+            new_cols.append(name)
+        df.columns = new_cols
+
+    # 4) Tamamen boş kolonları at
+    df = df.dropna(axis=1, how="all")
+
+    # 5) Kolon adlarını standart isimlere map et
+    df = _map_contact_columns(df)
+
+    # 6) Zorunlu kolon kontrolü
+    missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
+    if missing:
+        cols_map_debug = {c: _norm_colname(c) for c in df.columns}
+        st.error(f"Rehberde zorunlu kolon(lar) eksik: {', '.join(missing)}")
+        st.write("Algılanan kolonlar (normalize):", cols_map_debug)
+        st.dataframe(df.head(20), use_container_width=True)
+        raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
+
+    # 7) Temizlik ve DaireID üret
+    def _pad3_for_merge(x) -> str:
+        digits = "".join(ch for ch in str(x or "") if ch.isdigit())
+        return digits.zfill(3) if digits else ""
+
+    def _quick_norm_phone(x: str) -> str:
+        s = re.sub(r"[^\d+]", "", str(x))
+        if s.startswith("+"):                return s
+        if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
+        if re.fullmatch(r"5\d{9}", s):       return "+90" + s
+        if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
+        if re.fullmatch(r"90\d{10}", s):     return "+" + s
+        return s
+
+    if "Ad Soyad / Unvan" not in df.columns:
+        df["Ad Soyad / Unvan"] = None
+
+    df["Blok"] = df["Blok"].astype(str).str.upper().str.strip()
+    df["Daire No"] = df["Daire No"].apply(_pad3_for_merge)
+    df["Telefon"] = df["Telefon"].apply(_quick_norm_phone)
+    df["DaireID"] = df["Blok"] + "-" + df["Daire No"]
+
+    out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]].copy()
+    return out
 
 # =========================================================
-# STREAMLIT UI
+# UI
 # =========================================================
-st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
 tab_a, tab_b, tab_c = st.tabs([
@@ -762,7 +806,7 @@ with tab_c:
         st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
         zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip", label_visibility="collapsed")
     with up2:
-        st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (XLSX/CSV). En az `Blok`, `Daire No`, `Telefon` olmalı.")
+        st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (Apsiyon ham Excel/CSV).")
         rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber", label_visibility="collapsed")
 
     with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
@@ -782,7 +826,7 @@ with tab_c:
             st.warning("Önce Rehber dosyası yükleyin.")
             st.stop()
 
-        # ZIP → PDF listesi
+        # ZIP → PDF listesi + DaireID çıkar
         try:
             zf = zipfile.ZipFile(zip_up)
             pdf_rows = []
@@ -812,72 +856,20 @@ with tab_c:
             st.error("ZIP’te PDF bulunamadı.")
             st.stop()
 
-        # Rehber oku
+        # === REHBERİ YÜKLE (SAĞLAM YOL) ===
         try:
-            if rehber_up.name.lower().endswith(".csv"):
-                raw = pd.read_csv(rehber_up)
-            else:
-                raw = pd.read_excel(rehber_up, engine="openpyxl")
+            rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
         except Exception as e:
-            st.error(f"Rehber okunamadı: {e}")
+            st.error(f"Rehber okunamadı / eşlenemedi: {e}")
             st.stop()
-
-        # Kolon haritalama (akıllı)
-        cols_map = {c: _norm_colname(c) for c in raw.columns}
-
-        # Blok (blok / blok adı / blok adi / blokad…)
-        c_blok = _pick_col_contains(cols_map, "blok")
-
-        # Daire (daire no / daireno / daire)
-        c_dno  = _pick_col_contains(cols_map, "daire no", "daireno", "daire")
-
-        # Telefon (telefon no / telefon / tel / cep / gsm)
-        c_tel  = _pick_col_contains(cols_map, "telefon no", "telefon", "tel no", "tel", "cep", "gsm")
-
-        # Ad Soyad (opsiyonel)
-        c_ad   = _pick_col_contains(cols_map, "ad soyad / unvan", "ad soyad", "unvan")
-
-        if not c_blok or not c_dno or not c_tel:
-            st.error("Rehberde en az 'Blok', 'Daire No' ve 'Telefon' (Telefon No) başlıkları olmalı.")
-            st.write("Algılanan kolonlar (normalize):", cols_map)
-            st.dataframe(raw.head(20), use_container_width=True, height=480)
-            st.stop()
-
-        def _pad3_for_merge(x) -> str:
-            digits = "".join(ch for ch in str(x or "") if ch.isdigit())
-            return digits.zfill(3) if digits else ""
-
-        # Rehber normalize
-        reh = pd.DataFrame({
-            "Blok": raw[c_blok].astype(str).str.upper().str.strip(),
-            "Daire No": raw[c_dno].apply(_pad3_for_merge),
-            "Telefon": raw[c_tel].astype(str),
-            "Ad Soyad / Unvan": raw[c_ad].astype(str) if c_ad else ""
-        })
-        reh["DaireID"] = reh["Blok"].str.upper().str.strip() + "-" + reh["Daire No"]
-
-        # Telefon pratik normalizasyon
-        def _quick_norm_phone(x: str) -> str:
-            s = re.sub(r"[^\d+]", "", x)
-            if s.startswith("+"):
-                return s
-            if re.fullmatch(r"05\d{9}", s):   # 05XXXXXXXXX
-                return "+90" + s[1:]
-            if re.fullmatch(r"5\d{9}", s):    # 5XXXXXXXXX
-                return "+90" + s
-            if re.fullmatch(r"0\d{10,11}", s):
-                return "+90" + s[1:]
-            if re.fullmatch(r"90\d{10}", s):
-                return "+" + s
-            return s
-        reh["Telefon"] = reh["Telefon"].apply(_quick_norm_phone)
 
         # Eşleştirme
-        merged = pdf_df.merge(reh[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
-        base_url_state = st.session_state.get("wa_base", "")
-        use_base = base_url_state if base_url_state else base_url
-        merged["file_url"] = merged["file_name"].apply(lambda fn: (use_base.rstrip("/") + "/" + fn) if use_base and use_base.strip() else "")
+        merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
+        merged["file_url"] = merged["file_name"].apply(
+            lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
+        )
 
+        # Durum
         a1, a2, a3 = st.columns(3)
         with a1:
             st.metric("Toplam kayıt", len(merged))
