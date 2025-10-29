@@ -1,98 +1,48 @@
 # app.py
-# Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (tek dosya)
-import io
-import os
-import re
-import zipfile
-import unicodedata
+# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive UUID Upload entegre) ===
+import io, os, re, zipfile, unicodedata, uuid, json
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
 
+# Google Drive
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+
 # PDF
 from pypdf import PdfReader, PdfWriter
 
-# ReportLab for overlays
+# ReportLab (alt yazı)
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# optional docx
+# (opsiyonel) .docx
 try:
-    import docx
+    import docx  # python-docx
     HAS_DOCX = True
 except Exception:
     HAS_DOCX = False
 
-# ----------------------------
-# Google Drive (service account)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Streamlit Page
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
+
+# -----------------------------------------------------------------------------
+# Fontlar (varsa yükle; yoksa sessiz geçsin)
+# -----------------------------------------------------------------------------
 try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseUpload
-    GAPI_AVAILABLE = True
+    pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
+    pdfmetrics.registerFont(TTFont("NotoSans-Bold",    "fonts/NotoSans-Bold.ttf"))
 except Exception:
-    GAPI_AVAILABLE = False
+    pass
 
-_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-@st.cache_resource(show_spinner=False)
-def _drive_service():
-    if not GAPI_AVAILABLE:
-        raise RuntimeError("google-api-python-client veya google-auth kütüphaneleri yüklü değil.")
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError("st.secrets içinde 'gcp_service_account' bulunamadı. Servis hesabı bilgilerini secrets'a ekleyin.")
-    sa_dict = dict(st.secrets["gcp_service_account"])
-    credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
-    return build("drive", "v3", credentials=credentials, cache_discovery=False)
-
-def drive_get_folder_by_id(folder_id: str) -> Optional[dict]:
-    srv = _drive_service()
-    try:
-        meta = srv.files().get(fileId=folder_id, fields="id,name,mimeType").execute()
-        return meta
-    except Exception:
-        return None
-
-def drive_ensure_folder(folder_name: str) -> str:
-    srv = _drive_service()
-    q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    res = srv.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-    file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
-    folder = srv.files().create(body=file_meta, fields="id").execute()
-    return folder["id"]
-
-def drive_upload_pdf(bytes_io: io.BytesIO, filename: str, parent_folder_id: str) -> dict:
-    srv = _drive_service()
-    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
-    file_meta = {"name": filename, "parents": [parent_folder_id]}
-    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink").execute()
-    return f
-
-def drive_share_anyone_reader(file_id: str) -> None:
-    srv = _drive_service()
-    perm = {"type": "anyone", "role": "reader"}
-    try:
-        srv.permissions().create(fileId=file_id, body=perm, fields="id").execute()
-    except Exception:
-        # zaten varsa sessizce geç
-        pass
-
-# ----------------------------
-# Fonts
-# ----------------------------
-# fonts klasöründe NotoSans-Regular / Bold olmalı
-pdfmetrics.registerFont(TTFont("NotoSans-Regular", "fonts/NotoSans-Regular.ttf"))
-pdfmetrics.registerFont(TTFont("NotoSans-Bold",    "fonts/NotoSans-Bold.ttf"))
-
-# ----------------------------
-# Yardımcı fonksiyonlar
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Yardımcılar (genel)
+# -----------------------------------------------------------------------------
 def _pad3_digits(s: str) -> str:
     s = "".join(ch for ch in str(s) if ch.isdigit())
     return s.zfill(3) if s else "000"
@@ -107,9 +57,10 @@ def _to_float_tr(s: str) -> float:
         return 0.0
 
 def _normalize_tr(t: str) -> str:
+    """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
         return ""
-    t = unicodedata.normalize("NFKD", str(t))
+    t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
     t = (t.replace("ı","i").replace("İ","I")
            .replace("ş","s").replace("Ş","S")
@@ -126,19 +77,12 @@ def _norm_colname(s: str) -> str:
             .replace("\n"," ").replace("\r"," ")
             .replace(".","").replace("_"," ").replace("-"," "))
 
-def _pick_col(cols_map: dict, *candidates) -> Optional[str]:
-    for orig, normed in cols_map.items():
-        for cand in candidates:
-            if normed == cand:
-                return orig
-    return None
-
-# ----------------------------
-# ALT YAZI / OVERLAY
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Alt Yazı (wrap & overlay)
+# -----------------------------------------------------------------------------
 def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
     lines = []
-    for raw in str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if not raw.strip():
             lines.append("")
             continue
@@ -166,19 +110,32 @@ def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float)
         lines.append(current)
     return lines
 
-def build_footer_overlay(page_w: float, page_h: float, footer_text: str, font_size: int = 11,
-                         leading: int = 14, align: str = "left", bottom_margin: int = 48,
-                         box_height: int = 180, bold_rules: bool = True) -> io.BytesIO:
+def build_footer_overlay(
+    page_w: float,
+    page_h: float,
+    footer_text: str,
+    font_size: int = 11,
+    leading: int = 14,
+    align: str = "left",  # "left" | "center"
+    bottom_margin: int = 48,
+    box_height: int = 180,
+    bold_rules: bool = True,
+) -> io.BytesIO:
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page_w, page_h))
+
     left_margin = 36
     right_margin = 36
     max_text_width = page_w - left_margin - right_margin
+
     wrapped = wrap_by_width(footer_text, "NotoSans-Regular", font_size, max_text_width)
+
     max_lines = max(1, int(box_height // leading))
     if len(wrapped) > max_lines:
         wrapped = wrapped[:max_lines]
+
     y_start = bottom_margin + (len(wrapped) - 1) * leading + 4
+
     for i, line in enumerate(wrapped):
         use_bold = False
         if bold_rules:
@@ -189,12 +146,14 @@ def build_footer_overlay(page_w: float, page_h: float, footer_text: str, font_si
                 use_bold = True
             if "TARİHLİ TEMSİLCİLER" in u:
                 use_bold = True
+
         can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
         y = y_start - i * leading
         if align == "center":
             can.drawCentredString(page_w / 2.0, y, line)
         else:
             can.drawString(left_margin, y, line)
+
     can.save()
     packet.seek(0)
     return packet
@@ -224,9 +183,9 @@ def split_pdf(src_bytes: bytes) -> List[Tuple[str, bytes]]:
         pages.append((f"page_{i:03d}.pdf", b.getvalue()))
     return pages
 
-# ----------------------------
-# Daire ID algılama ve köşe etiket
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Daire No Algılama & Köşe Etiketi & Yeniden Adlandırma
+# -----------------------------------------------------------------------------
 _re_daire_norms = [
     re.compile(r"DAIRE\s*NO[^A-Z0-9]{0,15}([A-Z]\d)[^0-9]{0,20}(\d{1,4})"),
     re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DAIRE[^0-9]{0,10}(\d{1,4})"),
@@ -252,15 +211,18 @@ def _find_daire_id(raw_text: str) -> Optional[str]:
             return f"{blok}-{dno}"
     return None
 
-def build_corner_label_overlay(page_w: float, page_h: float, label_text: str,
-                               font_size: int = 13, bold: bool = True,
-                               position: str = "TR", pad_x: int = 20, pad_y: int = 20) -> io.BytesIO:
+def build_corner_label_overlay(
+    page_w: float, page_h: float, label_text: str,
+    font_size: int = 13, bold: bool = True,
+    position: str = "TR", pad_x: int = 20, pad_y: int = 20
+) -> io.BytesIO:
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page_w, page_h))
     font_name = "NotoSans-Bold" if bold else "NotoSans-Regular"
     can.setFont(font_name, font_size)
     text_w = pdfmetrics.stringWidth(label_text, font_name, font_size)
     text_h = font_size * 1.2
+
     if position == "TR":
         x = page_w - pad_x - text_w
         y = page_h - pad_y - text_h
@@ -273,27 +235,41 @@ def build_corner_label_overlay(page_w: float, page_h: float, label_text: str,
     else:  # BL
         x = pad_x
         y = pad_y
+
     can.drawString(x, y, label_text)
     can.save()
     packet.seek(0)
     return packet
 
-def add_footer_and_stamp_per_page(src_bytes: bytes, footer_kwargs: dict, stamp_on: bool,
-                                  label_tpl: str, stamp_opts: dict, rename_files: bool) -> List[Tuple[str, bytes]]:
+def add_footer_and_stamp_per_page(
+    src_bytes: bytes,
+    footer_kwargs: dict,
+    stamp_on: bool,
+    label_tpl: str,
+    stamp_opts: dict,
+    rename_files: bool
+) -> List[Tuple[str, bytes]]:
     reader = PdfReader(io.BytesIO(src_bytes))
     out_pages: List[Tuple[str, bytes]] = []
+
     for i, page in enumerate(reader.pages, start=1):
         w = float(page.mediabox.width)
         h = float(page.mediabox.height)
+
+        # footer
         footer_overlay_io = build_footer_overlay(w, h, **footer_kwargs)
         footer_overlay = PdfReader(footer_overlay_io)
         page.merge_page(footer_overlay.pages[0])
+
+        # DaireID
         daire_id = None
         try:
             txt = page.extract_text() or ""
             daire_id = _find_daire_id(txt)
         except Exception:
             daire_id = None
+
+        # köşe etiketi
         if stamp_on and daire_id:
             label_text = label_tpl.format(daire_id=daire_id)
             label_overlay_io = build_corner_label_overlay(
@@ -306,43 +282,75 @@ def add_footer_and_stamp_per_page(src_bytes: bytes, footer_kwargs: dict, stamp_o
             )
             label_overlay = PdfReader(label_overlay_io)
             page.merge_page(label_overlay.pages[0])
+
+        # tek sayfa pdf
         wri = PdfWriter()
         wri.add_page(page)
         buf = io.BytesIO()
         wri.write(buf)
         buf.seek(0)
+
         fname = f"page_{i:03d}.pdf"
         if rename_files and daire_id:
             fname = f"{daire_id}.pdf"
+
         out_pages.append((fname, buf.getvalue()))
+
     return out_pages
 
-# ----------------------------
-# MANAS parser
-# ----------------------------
+# -----------------------------------------------------------------------------
+# MANAS PDF Parser (Isıtma / Sıcak Su / Su / Toplam)
+# -----------------------------------------------------------------------------
 def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     result: Dict[str, Dict[str, float]] = {}
+
+    re_daire_norms = [
+        re.compile(r"DAIRE\s*NO[^A-Z0-9]{0,15}([A-Z]\d)[^0-9]{0,20}(\d{1,4})"),
+        re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DAIRE[^0-9]{0,10}(\d{1,4})"),
+    ]
+    re_daire_raws = [
+        re.compile(r"DA[İI]RE\s*NO[^A-Z0-9]{0,15}([A-Z]\d)[^0-9]{0,20}(\d{1,4})"),
+        re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DA[İI]RE[^0-9]{0,10}(\d{1,4})"),
+    ]
     re_odenecek = re.compile(r"(?:ÖDENECEK|ODENECEK)\s*TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
     re_toplam   = re.compile(r"TOPLAM\s+TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
+
+    def find_daire_id(raw_text: str) -> Optional[str]:
+        norm = _normalize_tr(raw_text)
+        for rx in re_daire_norms:
+            m = rx.search(norm)
+            if m:
+                return f"{m.group(1).upper()}-{_pad3_digits(m.group(2))}"
+        for rx in re_daire_raws:
+            m = rx.search(raw_text)
+            if m:
+                return f"{m.group(1).upper()}-{_pad3_digits(m.group(2))}"
+        return None
+
+    def grab_section_amount(norm_text: str, header_word: str) -> float:
+        idx = norm_text.find(header_word)
+        if idx == -1:
+            return 0.0
+        tail = norm_text[idx: idx + 2500]
+        m = re_odenecek.search(tail)
+        return _to_float_tr(m.group(1)) if m else 0.0
+
     for pi, page in enumerate(reader.pages):
         raw = page.extract_text() or ""
         norm = _normalize_tr(raw)
-        did = _find_daire_id(raw)
+
+        did = find_daire_id(raw)
         if not did:
             if pi == 0:
                 st.info("⚠️ Daire No satırı bulunamadı. İlk sayfanın normalize içeriğinin bir kısmı:")
                 st.code(norm[:800])
             continue
-        def grab_section_amount(norm_text: str, header_word: str) -> float:
-            idx = norm_text.find(header_word)
-            if idx == -1:
-                return 0.0
-            tail = norm_text[idx: idx + 2500]
-            m = re_odenecek.search(tail)
-            return _to_float_tr(m.group(1)) if m else 0.0
+
         isitma = grab_section_amount(norm, "ISITMA")
         sicak  = grab_section_amount(norm, "SICAK SU")
+
+        # SU başlığı SICAK SU ile karışmasın:
         su = 0.0
         idx_sicak = norm.find("SICAK SU")
         search_base = norm[idx_sicak + 8:] if idx_sicak != -1 else norm
@@ -356,14 +364,17 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
                 su = _to_float_tr(m_su.group(1))
         if su == 0.0:
             su = grab_section_amount(norm, "\nSU")
+
         mt = re_toplam.search(norm)
         toplam = _to_float_tr(mt.group(1)) if mt else (isitma + sicak + su)
+
         result[did] = {"isitma": isitma, "sicak": sicak, "su": su, "toplam": toplam}
+
     return result
 
-# ----------------------------
-# Apsiyon template helpers
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Apsiyon Excel Yardımcıları
+# -----------------------------------------------------------------------------
 def _norm_cols(s: str) -> str:
     return (str(s).strip().lower()
             .replace("\n"," ").replace("\r"," ")
@@ -371,7 +382,7 @@ def _norm_cols(s: str) -> str:
 
 def _pad3_aps(x) -> str:
     try:
-        n = int(str(x).strip()); return f"{n:03d}"
+        n = int(str(x).strip());  return f"{n:03d}"
     except:
         s = str(x).strip()
         nums = "".join([ch for ch in s if ch.isdigit()])
@@ -427,7 +438,14 @@ def load_apsiyon_template(excel_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Apsiyon şablonunda 'Blok' / 'Daire No' başlıkları tespit edilemedi.")
     return df
 
-def fill_expenses_to_apsiyon(df_in: pd.DataFrame, totals: dict, mode: str, exp1: str, exp2: str, exp3: str) -> pd.DataFrame:
+def fill_expenses_to_apsiyon(
+    df_in: pd.DataFrame,
+    totals: dict,
+    mode: str,
+    exp1: str,
+    exp2: str,
+    exp3: str,
+) -> pd.DataFrame:
     df = df_in.copy()
     def make_did(blok, dno) -> str:
         b = str(blok).strip().upper()
@@ -457,15 +475,18 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
         df.to_excel(writer, index=False, sheet_name="Sheet1")
     return bio.getvalue()
 
-# ----------------------------
-# Rehber okuma (gelişmiş)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
+# -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
             .replace("\n"," ").replace("\r"," ")
             .replace(".","").replace("_"," ").replace("-"," "))
 
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
+    """
+    'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
+    """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
@@ -478,6 +499,10 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Op
     return None
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apsiyon’dan gelen başlıkları standart isimlere çevirir:
+    Hedef: Blok, Daire No, Ad Soyad / Unvan (ops), Tel.Tip (ops), Telefon
+    """
     mapping = {}
     for c in df.columns:
         nc = _norm_rehber(c)
@@ -494,19 +519,31 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Apsiyon çıktısını (başta 'Atlas Vadi Sitesi' ve 'Unnamed:' kolonları olsa bile)
+    otomatik başlık satırı tespitiyle okur ve standart kolonlara map eder.
+    Dönen kolonlar en az: Blok, Daire No, Telefon (+ opsiyonel: Ad Soyad / Unvan)
+    """
     from io import BytesIO
+
+    # 1) Ham oku (header=None) ve başlığı bul
     if filename.lower().endswith(".csv"):
         raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
     else:
         raw = pd.read_excel(BytesIO(file_bytes), header=None, dtype=str, engine="openpyxl")
+
     hdr = _find_header_row_contacts(raw, search_rows=50)
     if hdr is None:
         st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
         hdr = 0
+
+    # 2) Başlıkla tekrar oku
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(BytesIO(file_bytes), header=hdr, dtype=str)
     else:
         df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
+
+    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
     if hdr > 0:
         upper = raw.iloc[hdr-1]
         new_cols = []
@@ -520,8 +557,14 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
                     name = f"Kolon_{i+1}"
             new_cols.append(name)
         df.columns = new_cols
+
+    # 4) Tamamen boş kolonları at
     df = df.dropna(axis=1, how="all")
+
+    # 5) Kolon adlarını standart isimlere map et
     df = _map_contact_columns(df)
+
+    # 6) Zorunlu kolon kontrolü
     missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
     if missing:
         cols_map_debug = {c: _norm_colname(c) for c in df.columns}
@@ -529,9 +572,13 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.write("Algılanan kolonlar (normalize):", cols_map_debug)
         st.dataframe(df.head(20), use_container_width=True)
         raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
+
+    # 7) Temizlik ve DaireID üret
     def _pad3_for_merge(x) -> str:
+        digits = "".join(ch for ch in str(x or "") if x is not None and str(x))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
+
     def _quick_norm_phone(x: str) -> str:
         s = re.sub(r"[^\d+]", "", str(x))
         if s.startswith("+"):                return s
@@ -540,19 +587,62 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
         if re.fullmatch(r"90\d{10}", s):     return "+" + s
         return s
+
     if "Ad Soyad / Unvan" not in df.columns:
         df["Ad Soyad / Unvan"] = None
+
     df["Blok"] = df["Blok"].astype(str).str.upper().str.strip()
     df["Daire No"] = df["Daire No"].apply(_pad3_for_merge)
     df["Telefon"] = df["Telefon"].apply(_quick_norm_phone)
     df["DaireID"] = df["Blok"] + "-" + df["Daire No"]
+
     out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]].copy()
     return out
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
+# -----------------------------------------------------------------------------
+# Google Drive (Service Account) Helpers
+# -----------------------------------------------------------------------------
+_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+@st.cache_resource(show_spinner=False)
+def _drive_service():
+    if "gcp_service_account" not in st.secrets:
+        raise RuntimeError("Streamlit secrets içinde 'gcp_service_account' bulunamadı.")
+    sa_dict = dict(st.secrets["gcp_service_account"])
+    credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
+    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+def drive_ensure_folder(folder_name: str) -> str:
+    srv = _drive_service()
+    q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    res = srv.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=10).execute()
+    files = res.get("files", [])
+    if files:
+        return files[0]["id"]
+    file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
+    folder = srv.files().create(body=file_meta, fields="id").execute()
+    return folder["id"]
+
+def drive_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_id: str) -> dict:
+    srv = _drive_service()
+    ext = os.path.splitext(original_name)[1] or ".pdf"
+    safe_name = f"{uuid.uuid4().hex}{ext}"  # tahmin edilemez
+    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
+    file_meta = {"name": safe_name, "parents": [parent_folder_id]}
+    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink").execute()
+    return f
+
+def drive_share_anyone_reader(file_id: str) -> None:
+    srv = _drive_service()
+    perm = {"type": "anyone", "role": "reader"}
+    try:
+        srv.permissions().create(fileId=file_id, body=perm, fields="id").execute()
+    except Exception:
+        pass
+
+# -----------------------------------------------------------------------------
+# UI — 3 Sekme
+# -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
 tab_a, tab_b, tab_c = st.tabs([
@@ -561,17 +651,34 @@ tab_a, tab_b, tab_c = st.tabs([
     "📤 WhatsApp Gönderim Hazırlığı"
 ])
 
-# ---------------- TAB A (PDF işlemleri)
+# ---------------- TAB A: Böl & Alt Yazı ----------------
 with tab_a:
     pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"], key="pdf_a")
+
     if pdf_file:
         st.session_state["pdf_bytes"] = pdf_file.getvalue()
 
     st.subheader("Alt Yazı Kaynağı")
     t1, t2 = st.tabs(["✍️ Metin alanı", "📄 .docx yükle (opsiyonel)"])
-    default_text = "SON ÖDEME TARİHİ     24.10.2025\n\n..."
+
+    default_text = (
+        "SON ÖDEME TARİHİ     24.10.2025\n\n"
+        "Manas paylaşımlarında oturumda olup (0) gelen dairelerin önceki ödediği paylaşım tutarları baz alınarak "
+        "bedel yansıtılması; ayrıca İSKİ su sayacının okuduğu harcama tutarı ile site içerisindeki harcama tutarı "
+        "arasındaki farkın İSKİ faturasının ödenebilmesi için 152 daireye eşit olarak yansıtılması oya sunuldu. "
+        "Oybirliği ile kabul edildi.\n\n"
+        "28.02.2017 TARİHLİ TEMSİLCİLER OLAĞAN TOPLANTISINDA ALINAN KARARA İSTİNADEN\n"
+        "AÇIKLAMA\n"
+        "İski saatinden okunan m3 = 1.319  M3\n"
+        "Manas okuması m3= 1.202,5 M3\n"
+        "Ortak alan tüketimler m3= 32  M3 \n"
+        "Açıkta kalan:  84,5 m3     \n"
+        "Su m3 fiyatı 82,09   TL    84,5*82,9 = 7.005,05 TL / 152 = 46,08 TL."
+    )
+
     with t1:
         footer_text = st.text_area("Alt yazı", value=default_text, height=220, key="footer_text")
+
     with t2:
         if not HAS_DOCX:
             st.info("python-docx yüklü değilse .docx modu devre dışı olur.")
@@ -593,29 +700,44 @@ with tab_a:
         font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, 11, key="fs")
         leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14, key="lead")
     with c2:
-        align     = st.radio("Hizalama", ["left", "center"], index=0, key="align")
+        align     = st.radio("Hizalama", ["left", "center"], index=0, key="align", format_func=lambda x: "Sol" if x=="left" else "Orta")
         bottom_m  = st.slider("Alt Marj (pt)", 24, 100, 48, key="bm")
     box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, 180, key="bh")
     bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)", value=True, key="boldrules")
 
-    with st.expander("🏷️ Daire numarası etiketi & yeniden adlandırma (opsiyonel)"):
+    with st.expander("🏷️ Daire numarası etiketi & yeniden adlandırma (opsiyonel)", expanded=False):
         stamp_on = st.checkbox("Daire numarasını köşeye yaz", value=False, key="stamp_on")
         label_tpl = st.text_input("Etiket şablonu", value="Daire: {daire_id}", key="label_tpl")
-        stamp_font_size = st.slider("Etiket punto", 10, 20, 13, key="stamp_fs")
-        stamp_pos = st.selectbox("Konum", ["TR", "TL", "BR", "BL"], index=0, key="stamp_pos")
-        stamp_bold = st.checkbox("Kalın", value=True, key="stamp_bold")
-        pad_x = st.slider("Köşe yatay boşluk (px)", 0, 80, 20, step=2, key="pad_x")
-        pad_y = st.slider("Köşe dikey boşluk (px)", 0, 80, 20, step=2, key="pad_y")
+        c3, c4, c5 = st.columns(3)
+        with c3:
+            stamp_font_size = st.slider("Etiket punto", 10, 20, 13, key="stamp_fs")
+        with c4:
+            stamp_pos = st.selectbox("Konum", ["TR", "TL", "BR", "BL"], index=0, key="stamp_pos")
+        with c5:
+            stamp_bold = st.checkbox("Kalın", value=True, key="stamp_bold")
+        c6, c7 = st.columns(2)
+        with c6:
+            pad_x = st.slider("Köşe yatay boşluk (px)", 0, 80, 20, step=2, key="pad_x")
+        with c7:
+            pad_y = st.slider("Köşe dikey boşluk (px)", 0, 80, 20, step=2, key="pad_y")
         rename_files = st.checkbox("Bölünmüş dosya adını daireID.pdf yap", value=True, key="rename_files")
 
     st.subheader("İşlem")
-    mode = st.radio("Ne yapmak istersiniz?", ["Sadece sayfalara böl", "Sadece alt yazı uygula (tek PDF)", "Alt yazı uygula + sayfalara böl (ZIP)"], index=2, key="mode")
+    mode = st.radio(
+        "Ne yapmak istersiniz?",
+        ["Sadece sayfalara böl", "Sadece alt yazı uygula (tek PDF)", "Alt yazı uygula + sayfalara böl (ZIP)"],
+        index=2,
+        key="mode"
+    )
     go = st.button("🚀 Başlat", key="go_a")
+
     if go:
         if not pdf_file:
             st.warning("Lütfen önce bir PDF yükleyin.")
             st.stop()
+
         src = pdf_file.read()
+
         if mode == "Sadece sayfalara böl":
             pages = split_pdf(src)
             with io.BytesIO() as zbuf:
@@ -623,52 +745,111 @@ with tab_a:
                     for name, data in pages:
                         z.writestr(name, data)
                 st.download_button("📥 Bölünmüş sayfalar (ZIP)", zbuf.getvalue(), file_name="bolunmus_sayfalar.zip")
+
         elif mode == "Sadece alt yazı uygula (tek PDF)":
-            stamped = add_footer_to_pdf(src, footer_text=footer_text, font_size=font_size, leading=leading, align=align, bottom_margin=bottom_m, box_height=box_h, bold_rules=bold_rules)
+            stamped = add_footer_to_pdf(
+                src,
+                footer_text=footer_text,
+                font_size=font_size,
+                leading=leading,
+                align=align,
+                bottom_margin=bottom_m,
+                box_height=box_h,
+                bold_rules=bold_rules,
+            )
             st.download_button("📥 Alt yazılı PDF", stamped, file_name="alt_yazili.pdf")
+
         else:
-            footer_kwargs = dict(footer_text=footer_text, font_size=font_size, leading=leading, align=align, bottom_margin=bottom_m, box_height=box_h, bold_rules=bold_rules)
-            stamp_opts = dict(font_size=stamp_font_size, bold=stamp_bold, position=stamp_pos, pad_x=pad_x, pad_y=pad_y)
-            pages = add_footer_and_stamp_per_page(src_bytes=src, footer_kwargs=footer_kwargs, stamp_on=stamp_on, label_tpl=label_tpl, stamp_opts=stamp_opts, rename_files=rename_files)
+            footer_kwargs = dict(
+                footer_text=footer_text,
+                font_size=font_size,
+                leading=leading,
+                align=align,
+                bottom_margin=bottom_m,
+                box_height=box_h,
+                bold_rules=bold_rules,
+            )
+            stamp_opts = dict(
+                font_size=stamp_font_size,
+                bold=stamp_bold,
+                position=stamp_pos,
+                pad_x=pad_x,
+                pad_y=pad_y,
+            )
+            pages = add_footer_and_stamp_per_page(
+                src_bytes=src,
+                footer_kwargs=footer_kwargs,
+                stamp_on=stamp_on,
+                label_tpl=label_tpl,
+                stamp_opts=stamp_opts,
+                rename_files=rename_files,
+            )
             with io.BytesIO() as zbuf:
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
                     for name, data in pages:
                         z.writestr(name, data)
                 st.download_button("📥 Alt yazılı & bölünmüş (ZIP)", zbuf.getvalue(), file_name="alt_yazili_bolunmus.zip")
 
-# ---------------- TAB B (Apsiyon)
+# ---------------- TAB B: Apsiyon Gider Doldurucu ----------------
 with tab_b:
     st.subheader("📊 Apsiyon Gider Doldurucu")
     apsiyon_file = st.file_uploader("Apsiyon 'boş şablon' Excel dosyasını yükle (.xlsx)", type=["xlsx"], key="apsiyon_up")
+
     colM1, colM2 = st.columns(2)
     with colM1:
-        aps_mode = st.radio("Doldurma Şekli", ["Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)", "Seçenek 2 (G1=Toplam, G2/G3 boş)"], index=0, key="aps_mode")
+        aps_mode = st.radio(
+            "Doldurma Şekli",
+            ["Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)", "Seçenek 2 (G1=Toplam, G2/G3 boş)"],
+            index=0,
+            key="aps_mode"
+        )
     with colM2:
         exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su", key="aps_exp1")
         exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su", key="aps_exp2")
         exp3 = st.text_input("Gider3 Açıklaması", value="Isıtma", key="aps_exp3")
+
     go_fill = st.button("📥 PDF’ten tutarları çek ve Excel’e yaz", key="go_fill")
+
     if go_fill:
         pdf_bytes = st.session_state.get("pdf_bytes")
         if not pdf_bytes:
-            st.warning("Önce A sekmesinde fatura PDF’sini yükleyin (aynı PDF)."); st.stop()
+            st.warning("Önce A sekmesinde fatura PDF’sini yükleyin (aynı PDF).")
+            st.stop()
         if not apsiyon_file:
-            st.warning("Apsiyon Excel şablonunu yükleyin."); st.stop()
+            st.warning("Apsiyon Excel şablonunu yükleyin.")
+            st.stop()
+
         totals_map = parse_manas_pdf_totals(pdf_bytes)
         if not totals_map:
-            st.error("PDF’ten tutar okunamadı. (Daire başlıkları veya tutarlar bulunamadı)"); st.stop()
+            st.error("PDF’ten tutar okunamadı. (Daire başlıkları veya tutarlar bulunamadı)")
+            st.stop()
+
         try:
             df_aps = load_apsiyon_template(apsiyon_file.read())
         except Exception as e:
-            st.error(f"Excel okunamadı: {e}"); st.stop()
+            st.error(f"Excel okunamadı: {e}")
+            st.stop()
+
         df_out = fill_expenses_to_apsiyon(df_aps, totals_map, aps_mode, exp1, exp2, exp3)
         out_bytes = export_excel_bytes(df_out)
         st.success("Excel dolduruldu.")
-        st.download_button("📥 Doldurulmuş Apsiyon Excel", out_bytes, file_name="Apsiyon_Doldurulmus.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="dl_aps")
+        st.download_button(
+            "📥 Doldurulmuş Apsiyon Excel",
+            out_bytes,
+            file_name="Apsiyon_Doldurulmus.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_aps"
+        )
 
-# ---------------- TAB C (WhatsApp & Drive)
+# ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
-    st.markdown("<div style='background-color:#25D366;padding:10px;border-radius:10px;color:white;'><h3 style='margin:0'>📤 WhatsApp Gönderim Hazırlığı</h3></div>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
+      <img src='https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg' width='28'>
+      <h3 style='margin:0;'>WhatsApp Gönderim Hazırlığı</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
     up1, up2 = st.columns([1,1], vertical_alignment="top")
     with up1:
         st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
@@ -680,20 +861,25 @@ with tab_c:
     with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
         base_url = st.text_input("Base URL (örn: https://cdn.site.com/faturalar/ )", value="", key="wa_base")
 
-    ctop1, ctop2 = st.columns([1,3])
+    ctop1, ctop2 = st.columns([1,3], vertical_alignment="center")
     with ctop1:
         go_btn = st.button("📑 Eşleştir ve CSV oluştur", use_container_width=True, key="wa_go")
+    with ctop2:
+        st.caption("Butona bastıktan sonra aşağıda geniş bir önizleme tablosu ve indirme butonu görünür.")
+
     if go_btn:
         if not zip_up:
             st.warning("Önce ZIP yükleyin."); st.stop()
         if not rehber_up:
             st.warning("Önce Rehber dosyası yükleyin."); st.stop()
+
+        # ZIP → PDF listesi + DaireID çıkar
         try:
             zf = zipfile.ZipFile(zip_up)
             pdf_rows = []
             for info in zf.infolist():
-                if info.is_dir(): continue
-                if not info.filename.lower().endswith(".pdf"): continue
+                if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
+                    continue
                 base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
                 m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
                      or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
@@ -708,79 +894,124 @@ with tab_c:
             pdf_df = pd.DataFrame(pdf_rows)
         except Exception as e:
             st.error(f"ZIP okunamadı: {e}"); st.stop()
+
         if pdf_df.empty:
             st.error("ZIP’te PDF bulunamadı."); st.stop()
+
+        # Rehber oku (sağlam yol)
         try:
             rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
         except Exception as e:
             st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
-        merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
-        merged["file_url"] = merged["file_name"].apply(lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else "")
-        a1, a2, a3 = st.columns(3)
-        with a1:
-            st.metric("Toplam kayıt", len(merged))
-        with a2:
-            st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-        with a3:
-            st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
-        st.markdown("**Eşleştirme Önizleme**")
-        st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}), use_container_width=True, height=400)
-        out_csv = merged.rename(columns={"Telefon":"phone","Ad Soyad / Unvan":"name","DaireID":"daire_id","file_name":"file_name","file_url":"file_url"})[["phone","name","daire_id","file_name","file_url"]]
-        b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv, file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True, key="dl_csv")
 
-        # Drive upload expander
-        st.markdown("### 🔐 Güvenli paylaşım: Dosyaları servis hesabı Drive’ına yükle")
-        with st.expander("Drive’a yükle ve tekil paylaşım linki üret (önerilen)"):
-            dcol1, dcol2 = st.columns([2,1])
-            with dcol1:
-                drive_folder_name = st.text_input("Klasör adı (Drive, servis hesabına ait)", value="AtlasVadi_Faturalar")
-                drive_folder_id_input = st.text_input("Veya doğrudan Klasör ID (opsiyonel)", value="")
-            with dcol2:
-                upload_btn = st.button("☁️ Drive’a yükle ve linkleri yaz", use_container_width=True)
+        # Eşleştirme
+        merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
+        merged["file_url"] = merged["file_name"].apply(
+            lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
+        )
+
+        a1, a2, a3 = st.columns(3)
+        with a1: st.metric("Toplam kayıt", len(merged))
+        with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+        with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+
+        st.markdown("**Eşleştirme Önizleme**")
+        st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                     use_container_width=True, height=600)
+
+        out_csv = merged.rename(columns={
+            "Telefon": "phone",
+            "Ad Soyad / Unvan": "name",
+            "DaireID": "daire_id",
+            "file_name": "file_name",
+            "file_url": "file_url",
+        })[["phone","name","daire_id","file_name","file_url"]]
+        b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv,
+                           file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True, key="dl_csv")
+
+        with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
+            st.code(
+                "Merhaba {name},\n"
+                "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
+                "Dosyayı butondan görüntüleyebilirsiniz.\n",
+                language="text"
+            )
+
+        # ------ Drive’a yükle ve UUID link ver ------
+        st.markdown("### 🔐 Drive’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
+        with st.expander("Drive yükleme (dosya düzeyinde 'anyone with link')", expanded=False):
+            dcol = st.columns([2,2,1])
+            drive_folder_name = dcol[0].text_input("Yeni klasör adı (servis hesabı Drive'ında)", value="AtlasVadi_Faturalar")
+            folder_id_input   = dcol[1].text_input("Opsiyonel: Varolan klasör ID (kendi Drive’ında, serv. hesabına Editor ver)", value="")
+            upload_btn = dcol[2].button("☁️ Yükle", use_container_width=True)
+
+            # Servis hesabı görüntüle (bilgi)
+            st.caption(f"Servis hesabı: {st.secrets.get('gcp_service_account', {}).get('client_email','(secrets yok)')}")
+
             if upload_btn:
-                if not GAPI_AVAILABLE:
-                    st.error("Google API kitaplıkları yüklü değil (google-auth/google-api-python-client)."); st.stop()
-                # klasör id varsa kontrol et, yoksa isimden oluştur
-                folder_id = None
-                if drive_folder_id_input and drive_folder_id_input.strip():
-                    fid = drive_folder_id_input.strip()
-                    meta = drive_get_folder_by_id(fid)
-                    if not meta:
-                        st.error("Verilen Klasör ID bulunamadı ya da erişiminiz yok. Servis hesabını klasöre 'Düzenleyici' olarak eklediniz mi?")
-                        st.stop()
-                    folder_id = fid
-                else:
-                    try:
-                        folder_id = drive_ensure_folder(drive_folder_name)
-                    except Exception as e:
-                        st.error(f"Klasör oluşturma/hazırlama hatası: {e}"); st.stop()
-                zf = zipfile.ZipFile(zip_up)
+                if not zip_up:
+                    st.warning("Önce ZIP yükleyin."); st.stop()
+
+                try:
+                    if folder_id_input.strip():
+                        target_folder_id = folder_id_input.strip()
+                        st.info("Belirtilen klasöre yükleniyor. Bu klasörü servis hesabı e-postasıyla **Editor** paylaştığınızdan emin olun.")
+                    else:
+                        with st.spinner("Servis hesabı Drive'ında klasör hazırlanıyor..."):
+                            target_folder_id = drive_ensure_folder(drive_folder_name)
+                except Exception as e:
+                    st.error(f"Drive servisi hatası: {e}"); st.stop()
+
+                try:
+                    zf = zipfile.ZipFile(zip_up)
+                except Exception as e:
+                    st.error(f"ZIP açılamadı: {e}"); st.stop()
+
+                pdf_infos = [i for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf")]
+                if not pdf_infos:
+                    st.error("ZIP içinde PDF yok."); st.stop()
+
                 uploaded_map = {}
                 progress = st.progress(0)
-                total_pdf = sum(1 for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf"))
-                if total_pdf == 0:
-                    st.error("ZIP içinde PDF bulunamadı."); st.stop()
+                total = len(pdf_infos)
                 done = 0
-                for info in zf.infolist():
-                    if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
-                        continue
+
+                for info in pdf_infos:
                     base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
                     data = zf.read(info)
                     bio = io.BytesIO(data)
                     try:
-                        meta = drive_upload_pdf(bio, base, folder_id)
+                        meta = drive_upload_pdf(bio, base, target_folder_id)
                         drive_share_anyone_reader(meta["id"])
                         link = meta.get("webViewLink") or meta.get("webContentLink")
                         uploaded_map[base] = link
-                        done += 1
-                        progress.progress(min(1.0, done / total_pdf))
                     except Exception as e:
-                        st.error(f"Yüklerken hata: {base} -> {e}")
-                st.success(f"{done} PDF yüklendi ve paylaşıldı.")
+                        st.warning(f"Yükleme hatası ({base}): {e}")
+                    done += 1
+                    progress.progress(done/total)
+
+                st.success(f"Yükleme tamam: {done}/{total}")
+
+                # merged'e linkleri yaz
+                if "file_url" not in merged.columns:
+                    merged["file_url"] = ""
                 merged["file_url"] = merged.apply(lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1)
-                st.dataframe(merged.rename(columns={"Telefon":"phone","Ad Soyad / Unvan":"name"}), use_container_width=True, height=400)
-                out_csv = merged.rename(columns={"Telefon":"phone","Ad Soyad / Unvan":"name","DaireID":"daire_id","file_name":"file_name","file_url":"file_url"})[["phone","name","daire_id","file_name","file_url"]]
-                b_csv2 = out_csv.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("📥 WhatsApp_Recipients.csv (güncel, Drive linkli)", b_csv2, file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
-                st.info("Not: Klasör herkese açık yapılmadı; sadece tekil dosyalar paylaşıldı. Herkes yalnızca verilen dosyanın linkine erişir.")
+
+                st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                             use_container_width=True, height=600)
+
+                out_csv2 = merged.rename(columns={
+                    "Telefon": "phone",
+                    "Ad Soyad / Unvan": "name",
+                    "DaireID": "daire_id",
+                    "file_name": "file_name",
+                    "file_url": "file_url",
+                })[["phone","name","daire_id","file_name","file_url"]]
+                b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
+                st.download_button("📥 WhatsApp_Recipients.csv (Drive UUID linkli)", b_csv2,
+                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
+
+                st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
+                                   file_name="uploaded_map.json")
+                st.info("Her dosya UUID isimli ve yalnızca dosya bazında paylaşıldı. Klasör herkese açılmadı, tahmin edilemez.")
