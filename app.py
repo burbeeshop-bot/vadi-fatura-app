@@ -1,16 +1,10 @@
 # app.py
-# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive UUID Upload + 1-2-3-4 Tanı Paneli) ===
-import io, os, re, zipfile, unicodedata, uuid, json, time
+# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Dropbox UUID Upload entegre) ===
+import io, os, re, zipfile, unicodedata, uuid, json
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
-
-# Google Drive
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from googleapiclient.errors import HttpError
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -42,7 +36,7 @@ except Exception:
     pass
 
 # -----------------------------------------------------------------------------
-# Küçük yardımcılar
+# Yardımcılar (genel)
 # -----------------------------------------------------------------------------
 def _pad3_digits(s: str) -> str:
     s = "".join(ch for ch in str(s) if ch.isdigit())
@@ -58,6 +52,7 @@ def _to_float_tr(s: str) -> float:
         return 0.0
 
 def _normalize_tr(t: str) -> str:
+    """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
         return ""
     t = unicodedata.normalize("NFKD", t)
@@ -76,20 +71,6 @@ def _norm_colname(s: str) -> str:
     return (str(s).strip().lower()
             .replace("\n"," ").replace("\r"," ")
             .replace(".","").replace("_"," ").replace("-"," "))
-
-def _mask_email(e: str) -> str:
-    if not e: return "(yok)"
-    parts = e.split("@")
-    if len(parts) != 2: return e
-    name, dom = parts
-    if len(name) <= 2: mname = name[0] + "*"
-    else: mname = name[0] + ("*"*(len(name)-2)) + name[-1]
-    return f"{mname}@{dom}"
-
-def _mask(s: str, keep: int = 6) -> str:
-    if not s: return "(yok)"
-    if len(s) <= keep: return "*"*len(s)
-    return s[:keep] + "*"*(len(s)-keep)
 
 # -----------------------------------------------------------------------------
 # Alt Yazı (wrap & overlay)
@@ -490,7 +471,7 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     return bio.getvalue()
 
 # -----------------------------------------------------------------------------
-# Rehber Okuyucu (WhatsApp için)
+# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
 # -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
@@ -498,6 +479,9 @@ def _norm_rehber(s: str) -> str:
             .replace(".","").replace("_"," ").replace("-"," "))
 
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
+    """
+    'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
+    """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
@@ -510,6 +494,10 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Op
     return None
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apsiyon’dan gelen başlıkları standart isimlere çevirir:
+    Hedef: Blok, Daire No, Ad Soyad / Unvan (ops), Tel.Tip (ops), Telefon
+    """
     mapping = {}
     for c in df.columns:
         nc = _norm_rehber(c)
@@ -526,8 +514,14 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Apsiyon çıktısını (başta 'Atlas Vadi Sitesi' ve 'Unnamed:' kolonları olsa bile)
+    otomatik başlık satırı tespitiyle okur ve standart kolonlara map eder.
+    Dönen kolonlar en az: Blok, Daire No, Telefon (+ opsiyonel: Ad Soyad / Unvan)
+    """
     from io import BytesIO
 
+    # 1) Ham oku (header=None) ve başlığı bul
     if filename.lower().endswith(".csv"):
         raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
     else:
@@ -538,11 +532,13 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
         hdr = 0
 
+    # 2) Başlıkla tekrar oku
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(BytesIO(file_bytes), header=hdr, dtype=str)
     else:
         df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
 
+    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
     if hdr > 0:
         upper = raw.iloc[hdr-1]
         new_cols = []
@@ -557,9 +553,13 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
             new_cols.append(name)
         df.columns = new_cols
 
+    # 4) Tamamen boş kolonları at
     df = df.dropna(axis=1, how="all")
+
+    # 5) Kolon adlarını standart isimlere map et
     df = _map_contact_columns(df)
 
+    # 6) Zorunlu kolon kontrolü
     missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
     if missing:
         cols_map_debug = {c: _norm_colname(c) for c in df.columns}
@@ -568,7 +568,9 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.dataframe(df.head(20), use_container_width=True)
         raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
+    # 7) Temizlik ve DaireID üret
     def _pad3_for_merge(x) -> str:
+        digits = "".join(ch for ch in str(x or "") if ch and str(x))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
 
@@ -592,145 +594,72 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]].copy()
     return out
 
-# ---------------- Drive Helpers (sağlamlaştırılmış) ----------------
-from googleapiclient.errors import HttpError
-# --- OAuth (kendi Google hesabınla) ---
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-
-OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-
-@st.cache_resource(show_spinner=False)
-def drive_service_oauth():
-    flow = InstalledAppFlow.from_client_config(
-    {
-        "installed": {
-            "client_id": st.secrets["oauth_credentials"]["client_id"],
-            "client_secret": st.secrets["oauth_credentials"]["client_secret"],
-            "redirect_uris": [st.secrets["oauth_credentials"]["redirect_uri"]],
-            "auth_uri": st.secrets["oauth_credentials"]["auth_uri"],
-            "token_uri": st.secrets["oauth_credentials"]["token_uri"],
-        }
-    },
-    scopes=_DRIVE_SCOPES,
-)
-    creds = flow.run_local_server(port=0)  # Streamlit Cloud'da da çalışır (rastgele port)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-
-@st.cache_resource(show_spinner=False)
-def _drive_service():
-    if "gcp_service_account" not in st.secrets:
-        raise RuntimeError("Streamlit secrets içinde 'gcp_service_account' bulunamadı.")
-    sa_dict = dict(st.secrets["gcp_service_account"])
-    credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
-    return build("drive", "v3", credentials=credentials, cache_discovery=False)
-    
-def drive_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_id: str) -> dict:
-    """Belirtilen klasöre PDF dosyasını yükler (Shared Drive destekli)."""
-    srv = _drive_service()
-    ext = os.path.splitext(original_name)[1] or ".pdf"
-    safe_name = f"{uuid.uuid4().hex}{ext}"  # benzersiz isim
-    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
-    file_meta = {"name": safe_name, "parents": [parent_folder_id]}
-    try:
-        f = srv.files().create(
-            body=file_meta,
-            media_body=media,
-            fields="id,name,webViewLink,webContentLink,parents,driveId",
-            supportsAllDrives=True
-        ).execute()
-        return f
-    except Exception as e:
-        msg = str(e)
-        if "storageQuotaExceeded" in msg or "Service Accounts do not have storage quota" in msg:
-            raise RuntimeError(
-                "🚫 Servis hesabı kişisel Drive’a yükleme yapamaz. "
-                "Çözüm: Ortak Sürücü oluştur, servis hesabını İçerik yöneticisi yap, "
-                "ve o sürücüdeki klasör ID’yi kullan."
-            )
-        raise
-def drive_check_folder_access(folder_id: str) -> dict:
-    """Folder ID servis hesabı tarafından görülebiliyor mu? (Paylaşılan Sürücü desteğiyle kontrol)"""
-    srv = _drive_service()
-    try:
-        meta = srv.files().get(
-            fileId=folder_id,
-            fields="id,name,driveId,owners,permissions",
-            supportsAllDrives=True,
-        ).execute()
-        return meta
-    except HttpError as e:
-        st.error(f"📂 Klasör ID erişilemedi: {e}")
-        st.info("➜ Bu klasörü servis hesabı e-postasıyla **Editor** olarak paylaşman gerekiyor.")
-        raise
-
-def drive_ensure_folder(folder_name: str) -> str:
-    srv = _drive_service()
-    # Shared Drive'larda da çalışsın:
-    res = srv.files().list(
-        q=f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-        spaces="drive",
-        fields="files(id,name,driveId,parents)",
-        pageSize=10,
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        corpora="allDrives",
-    ).execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
-    file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
-    folder = srv.files().create(
-        body=file_meta,
-        fields="id,driveId",
-        supportsAllDrives=True
-    ).execute()
-    return folder["id"]
-
-def drive_upload_bytes_to_folder(data: bytes, original_name: str, parent_folder_id: str, mime: str) -> dict:
-    """Verilen byte içeriğini klasöre yükle (dosya adı UUID; tahmin edilemez)."""
-    srv = _drive_service()
-    ext = os.path.splitext(original_name)[1] or ""
-    safe_name = f"{uuid.uuid4().hex}{ext or ''}"
-    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-    try:
-        # Erişim doğrulaması — fail fast
-        drive_check_folder_access(parent_folder_id)
-        f = srv.files().create(
-            body={"name": safe_name, "parents": [parent_folder_id]},
-            media_body=media,
-            fields="id,name,webViewLink,webContentLink",
-            supportsAllDrives=True
-        ).execute()
-        return f
-    except HttpError as e:
-        # Parent klasör erişim hatasında anlamlı mesaj ver
-        if getattr(e, "status_code", None) == 404 or "File not found" in str(e):
-            st.error("❌ Yükleme başarısız: Klasör ID servis hesabına **paylaşılmamış** ya da **yanlış**.")
-            st.info("➜ Klasörü servis hesabı e-postasıyla **Editor** olarak paylaş; sonra tekrar dene.")
-        else:
-            st.error(f"Drive API hatası: {e}")
-        raise
-
-def drive_share_anyone_reader(file_id: str) -> None:
-    """Dosyayı linki olan görüntüleyebilir yap."""
-    srv = _drive_service()
-    perm = {"type": "anyone", "role": "reader"}
-    try:
-        srv.permissions().create(fileId=file_id, body=perm, fields="id").execute()
-    except Exception:
-        pass
 # -----------------------------------------------------------------------------
-# UI — 4 Sekme (Tanı paneli eklendi)
+# Dropbox Helpers (UPLOAD + PAYLAŞIM LİNKİ)
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def _dropbox_client():
+    token = st.secrets.get("dropbox", {}).get("access_token")
+    if not token:
+        raise RuntimeError("Secrets içinde [dropbox].access_token yok.")
+    import dropbox  # lazy import
+    return dropbox.Dropbox(token)
+
+def dropbox_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_path: str) -> dict:
+    """
+    parent_folder_path: Dropbox içindeki klasör yolu. Örn: '/AtlasVadi_Faturalar'
+    Dosyayı benzersiz isimle yükler ve (varsa) paylaşımlı linki döndürür.
+    """
+    import dropbox
+    dbx = _dropbox_client()
+
+    # Klasör yolu normalize
+    if not parent_folder_path.startswith("/"):
+        parent_folder_path = "/" + parent_folder_path
+    parent_folder_path = parent_folder_path.rstrip("/")
+
+    # Benzersiz dosya adı
+    ext = os.path.splitext(original_name)[1] or ".pdf"
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    dropbox_path = f"{parent_folder_path}/{safe_name}"
+
+    # Upload
+    bytes_io.seek(0)
+    dbx.files_upload(bytes_io.read(), dropbox_path, mode=dropbox.files.WriteMode.add)
+
+    # Paylaşımlı link — önce var mı bak, yoksa oluştur
+    links = dbx.sharing_list_shared_links(path=dropbox_path, direct_only=True).links
+    if links:
+        url = links[0].url
+    else:
+        try:
+            link_meta = dbx.sharing_create_shared_link_with_settings(
+                dropbox_path,
+                settings=dropbox.sharing.SharedLinkSettings(requested_visibility=dropbox.sharing.RequestedVisibility.public)
+            )
+            url = link_meta.url
+        except dropbox.exceptions.ApiError as e:
+            # Bazı planlarda public link izinleri kısıtlı olabilir; fallback: mevcut linkleri listele
+            links = dbx.sharing_list_shared_links(path=dropbox_path, direct_only=True).links
+            if not links:
+                raise e
+            url = links[0].url
+
+    # WhatsApp’ta direkt indirme için dl=1 yapalım (Dropbox linkleri genelde dl=0 gelir)
+    if url.endswith("?dl=0"):
+        url = url[:-5] + "?dl=1"
+
+    return {"path": dropbox_path, "name": safe_name, "url": url}
+
+# -----------------------------------------------------------------------------
+# UI — 3 Sekme
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_d = st.tabs([
+tab_a, tab_b, tab_c = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
-    "📤 WhatsApp Gönderim Hazırlığı",
-    "🧪 Drive Tanı (1-2-3-4)"
+    "📤 WhatsApp Gönderim Hazırlığı"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
@@ -923,7 +852,7 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB C: WhatsApp Gönderim Hazırlığı (manuel base URL veya Drive UUID Upload) ----------------
+# ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
     <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
@@ -955,6 +884,7 @@ with tab_c:
         if not rehber_up:
             st.warning("Önce Rehber dosyası yükleyin."); st.stop()
 
+        # ZIP → PDF listesi + DaireID çıkar
         try:
             zf = zipfile.ZipFile(zip_up)
             pdf_rows = []
@@ -979,11 +909,13 @@ with tab_c:
         if pdf_df.empty:
             st.error("ZIP’te PDF bulunamadı."); st.stop()
 
+        # Rehber oku (sağlam yol)
         try:
             rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
         except Exception as e:
             st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
 
+        # Eşleştirme
         merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
         merged["file_url"] = merged["file_name"].apply(
             lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
@@ -1017,82 +949,53 @@ with tab_c:
                 language="text"
             )
 
-        # ------ Drive’a yükle ve UUID link ver ------
-        st.markdown("### 🔐 Drive’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
-        with st.expander("Drive yükleme (dosya düzeyinde 'anyone with link')", expanded=False):
-            dcol = st.columns([2,2,1])
-            drive_folder_name = dcol[0].text_input("Yeni klasör adı (servis hesabı Drive'ında)", value="AtlasVadi_Faturalar")
-            folder_id_input   = dcol[1].text_input("Opsiyonel: Varolan klasör ID (kendi Drive’ında, serv. hesabına Editor ver)", value="")
-            upload_btn = dcol[2].button("☁️ Yükle", use_container_width=True)
+        # ------ Dropbox’a yükle ve UUID link ver ------
+        st.markdown("### 🔐 Dropbox’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
+        with st.expander("Dropbox yükleme (dosya bazında paylaşımlı link)", expanded=False):
+            dcol1, dcol2 = st.columns([2,1])
+            dropbox_folder = dcol1.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar", help="Örn: /AtlasVadi_Faturalar (varsa kullanılır, yoksa otomatik oluşturulur)")
+            upload_btn = dcol2.button("☁️ Yükle", use_container_width=True)
 
-            st.caption(f"Servis hesabı: {_mask_email(_load_sa_from_secrets().get('client_email'))}")
+            # Token var mı göstermek için mini kontrol:
+            token_present = bool(st.secrets.get("dropbox", {}).get("access_token"))
+            st.caption("Dropbox token: " + ("✅ var" if token_present else "❌ yok (secrets’a ekleyin)"))
 
             if upload_btn:
-                logs = []
-                def log(msg): logs.append(msg)
-
-                if not zip_up:
-                    st.warning("Önce ZIP yükleyin."); st.stop()
-
-                try:
-                    if folder_id_input.strip():
-                        target_folder_id = folder_id_input.strip()
-                        log(f"Varolan klasöre yükleme: {target_folder_id}")
-                        try:
-                            meta = drive_check_folder_access(target_folder_id)
-                            log(f"Klasör adı: {meta.get('name')} | mimeType: {meta.get('mimeType')}")
-                        except Exception as e:
-                            log(f"Klasör kontrolü başarısız: {e}")
-                    else:
-                        with st.spinner("Servis hesabı Drive'ında klasör hazırlanıyor..."):
-                            target_folder_id = drive_ensure_folder(drive_folder_name)
-                            log(f"Oluşturulan/tespit edilen klasör ID: {target_folder_id}")
-                except Exception as e:
-                    st.error("Drive servisine bağlanamadı.")
-                    st.exception(e)
-                    st.code("\n".join(logs))
+                if not token_present:
+                    st.error("Dropbox access token bulunamadı. Secrets’a ekleyin: [dropbox].access_token")
                     st.stop()
 
                 try:
                     zf = zipfile.ZipFile(zip_up)
                 except Exception as e:
-                    st.error("ZIP açılamadı.")
-                    st.exception(e)
-                    st.code("\n".join(logs))
-                    st.stop()
+                    st.error(f"ZIP açılamadı: {e}"); st.stop()
 
                 pdf_infos = [i for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf")]
                 if not pdf_infos:
-                    st.error("ZIP içinde PDF yok.")
-                    st.code("\n".join(logs))
-                    st.stop()
+                    st.error("ZIP içinde PDF yok."); st.stop()
 
                 uploaded_map = {}
                 progress = st.progress(0)
                 total = len(pdf_infos)
                 done = 0
 
+                # Klasör oluşturma: Dropbox path bazlıdır; upload sırasında yoksa otomatik oluşur.
                 for info in pdf_infos:
                     base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
                     data = zf.read(info)
                     bio = io.BytesIO(data)
                     try:
-                        meta = drive_upload_pdf(bio, base, target_folder_id)
-                        drive_share_anyone_reader(meta["id"])
-                        link = meta.get("webViewLink") or meta.get("webContentLink")
+                        meta = dropbox_upload_pdf(bio, base, dropbox_folder)
+                        link = meta["url"]
                         uploaded_map[base] = link
-                        log(f"OK: {base} -> {meta.get('name')} | {link}")
-                    except HttpError as he:
-                        log(f"HttpError: {base} -> {he}")
-                        st.warning(f"Yükleme hatası (HttpError) — {base}: {he}")
                     except Exception as e:
-                        log(f"EXC: {base} -> {e}")
-                        st.warning(f"Yükleme hatası — {base}: {e}")
+                        st.warning(f"Yükleme hatası ({base}): {e}")
                     done += 1
                     progress.progress(done/total)
 
                 st.success(f"Yükleme tamam: {done}/{total}")
 
+                # merged'e linkleri yaz
                 if "file_url" not in merged.columns:
                     merged["file_url"] = ""
                 merged["file_url"] = merged.apply(lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1)
@@ -1108,110 +1011,9 @@ with tab_c:
                     "file_url": "file_url",
                 })[["phone","name","daire_id","file_name","file_url"]]
                 b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("📥 WhatsApp_Recipients.csv (Drive UUID linkli)", b_csv2,
+                st.download_button("📥 WhatsApp_Recipients.csv (Dropbox UUID linkli)", b_csv2,
                                    file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
 
                 st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
                                    file_name="uploaded_map.json")
-
-                with st.expander("📜 Yükleme Logu", expanded=False):
-                    st.code("\n".join(logs) or "(log boş)")
-# --- Secrets okuyucu (Drive tanı sekmesi kullanıyor) ---
-def _load_sa_from_secrets() -> dict:
-    """Streamlit secrets içindeki [gcp_service_account] bloğunu sözlük olarak döner."""
-    if "gcp_service_account" not in st.secrets:
-        # UI'de düzgün mesaj görebilelim diye raise etmeden önce kısa bilgi verelim
-        st.error("secrets okunamadı / gcp_service_account yok.")
-        raise KeyError("gcp_service_account")
-    sa = dict(st.secrets["gcp_service_account"])
-    # kritik alanlar kontrolü (yanlış isim/eksik anahtar durumları için)
-    needed = ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri"]
-    missing = [k for k in needed if not sa.get(k)]
-    if missing:
-        st.error(f"secrets eksik alan(lar): {', '.join(missing)}")
-        raise KeyError(f"Missing secrets keys: {missing}")
-    return sa
-# ---------------- TAB D: Drive Tanı (1-2-3-4) ----------------
-with tab_d:
-    st.subheader("🧪 1) About (secrets & servis hesabı)")
-
-    sa_ok = True
-    try:
-        sa = _load_sa_from_secrets()
-        st.write("**project_id:**", _mask(sa.get("project_id","")))
-        st.write("**client_email:**", _mask_email(sa.get("client_email","")))
-        st.write("**token_uri:**", sa.get("token_uri",""))
-    except Exception as e:
-        sa_ok = False
-        st.error("secrets okunamadı / gcp_service_account yok.")
-        st.exception(e)
-
-    st.subheader("🧪 2) Drive servisine bağlan")
-    if st.button("🔑 OAuth ile Drive'a bağlan"):
-        try:
-            srv = drive_service_oauth()
-            st.success("OAuth ile Drive bağlantısı kuruldu! 🚀")
-            about = srv.about().get(fields="user, storageQuota, user.emailAddress").execute()
-            st.json(about)
-        except Exception as e:
-            st.error(f"Bağlantı hatası: {e}")
-            st.exception(e)
-    if st.button("🔌 Bağlanıp kimlik ve kapsam test et"):
-        if not sa_ok:
-            st.warning("Önce secrets sorununu düzeltin."); st.stop()
-        try:
-            srv = _drive_service()
-            st.success("Drive servisine bağlandı.")
-            st.write("Basit liste denemesi (0 sonuç olabilir, amaç yetki testidir):")
-            res = srv.files().list(pageSize=1, fields="files(id,name)").execute()
-            st.json(res)
-        except Exception as e:
-            st.error("Drive servisine bağlanılamadı.")
-            st.exception(e)
-
-    st.subheader("🧪 3) Klasör erişim testi")
-    c1,c2 = st.columns([2,1])
-    folder_id_test = c1.text_input("Varolan klasör ID (kendi Drive'ınız)", value="", help="Bu klasöre servis hesabına 'Editor' payı verdiniz mi?")
-    do_folder_check = c2.button("📂 Kontrol et")
-    if do_folder_check and folder_id_test.strip():
-        try:
-            meta = drive_check_folder_access(folder_id_test.strip())
-            st.success("Klasör erişimi mümkün.")
-            st.json(meta)
-        except HttpError as he:
-            st.error("HTTP hata (yetki/paylaşım?):")
-            st.code(str(he))
-        except Exception as e:
-            st.error("Klasör kontrolü başarısız.")
-            st.exception(e)
-
-    st.subheader("🧪 4) Test yükleme (küçük bir txt)")
-    c3,c4 = st.columns([2,1])
-    folder_id_for_upload = c3.text_input("Klasör ID (test yükleme için)", value="", help="Servis hesabına 'Editor' payı verilmiş olmalı.")
-    do_test_upload = c4.button("⬆️ Test dosyası yükle")
-    if do_test_upload:
-        if not folder_id_for_upload.strip():
-            st.warning("Klasör ID girin.")
-        else:
-            try:
-                # küçük bir metin dosyası pdf yerine
-                content = f"Atlas Vadi test yükleme {time.time()}"
-                bio = io.BytesIO(content.encode("utf-8"))
-                # PDF bekleyen yardımcı yerine doğrudan create çağıracağız (text/plain)
-                srv = _drive_service()
-                meta = srv.files().create(
-                    body={"name": f"test-{uuid.uuid4().hex}.txt", "parents": [folder_id_for_upload.strip()]},
-                    media_body=MediaIoBaseUpload(bio, mimetype="text/plain", resumable=False),
-                    fields="id,name,webViewLink,parents"
-                ).execute()
-                # paylaş
-                drive_share_anyone_reader(meta["id"])
-                file_meta = drive_get_file(meta["id"])
-                st.success("Test dosyası yüklendi ve paylaşıldı.")
-                st.json(file_meta)
-            except HttpError as he:
-                st.error("HTTP hata — muhtemelen klasöre yetki verilmemiştir (servis hesabına Editor).")
-                st.code(str(he))
-            except Exception as e:
-                st.error("Test yükleme hatası.")
-                st.exception(e)
+                st.info("Her dosya benzersiz UUID isimli ve yalnızca dosya bazında paylaşım linki üretildi. Klasörden listeleme yapmadan tahminle erişilemez.")
