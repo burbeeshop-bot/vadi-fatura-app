@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
+import requests, json, io
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -650,7 +651,40 @@ def dropbox_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_p
         url = url[:-5] + "?dl=1"
 
     return {"path": dropbox_path, "name": safe_name, "url": url}
+def dropbox_upload_test(dest_path="/AtlasVadi_Faturalar/hello.txt"):
+    """Dropbox token ve yükleme testi (hello.txt yükler)."""
+    token = st.secrets["dropbox"]["access_token"]
 
+    # 1) Token / kimlik testi — BOŞ JSON GÖNDERMEK ŞART
+    r = requests.post(
+        "https://api.dropboxapi.com/2/users/get_current_account",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        data="{}"
+    )
+    st.write("get_current_account:", r.status_code)
+    st.code(r.text)
+
+    # 2) Basit upload
+    data = io.BytesIO(b"Merhaba Dropbox!")
+    u = requests.post(
+        "https://content.dropboxapi.com/2/files/upload",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Dropbox-API-Arg": json.dumps({
+                "path": dest_path,           # Örn: /AtlasVadi_Faturalar/hello.txt
+                "mode": "add",
+                "autorename": True
+            }),
+            "Content-Type": "application/octet-stream",
+        },
+        data=data.getvalue()
+    )
+    st.write("upload:", u.status_code)
+    st.code(u.text)
+    
 # -----------------------------------------------------------------------------
 # UI — 3 Sekme
 # -----------------------------------------------------------------------------
@@ -1137,3 +1171,7 @@ if do_test:
 
         except Exception as e:
             st.error(f"Test hata: {e}")
+            st.subheader("Dropbox testi")
+dp_path = st.text_input("Yüklenecek hedef yol", "/AtlasVadi_Faturalar/hello.txt")
+if st.button("Dropbox’a test dosyası yükle"):
+    dropbox_upload_test(dp_path)
