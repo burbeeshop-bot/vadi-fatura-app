@@ -1066,7 +1066,21 @@ with tab_c:
 
                 with st.expander("📜 Yükleme Logu", expanded=False):
                     st.code("\n".join(logs) or "(log boş)")
-
+# --- Secrets okuyucu (Drive tanı sekmesi kullanıyor) ---
+def _load_sa_from_secrets() -> dict:
+    """Streamlit secrets içindeki [gcp_service_account] bloğunu sözlük olarak döner."""
+    if "gcp_service_account" not in st.secrets:
+        # UI'de düzgün mesaj görebilelim diye raise etmeden önce kısa bilgi verelim
+        st.error("secrets okunamadı / gcp_service_account yok.")
+        raise KeyError("gcp_service_account")
+    sa = dict(st.secrets["gcp_service_account"])
+    # kritik alanlar kontrolü (yanlış isim/eksik anahtar durumları için)
+    needed = ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri"]
+    missing = [k for k in needed if not sa.get(k)]
+    if missing:
+        st.error(f"secrets eksik alan(lar): {', '.join(missing)}")
+        raise KeyError(f"Missing secrets keys: {missing}")
+    return sa
 # ---------------- TAB D: Drive Tanı (1-2-3-4) ----------------
 with tab_d:
     st.subheader("🧪 1) About (secrets & servis hesabı)")
