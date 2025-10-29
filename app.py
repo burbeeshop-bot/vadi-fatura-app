@@ -1017,3 +1017,123 @@ with tab_c:
                 st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
                                    file_name="uploaded_map.json")
                 st.info("Her dosya benzersiz UUID isimli ve yalnızca dosya bazında paylaşım linki üretildi. Klasörden listeleme yapmadan tahminle erişilemez.")
+# ---- Dropbox yardımcıları (SDK’sız, HTTP ile) ----
+import requests, base64
+
+def _dbx_headers(token: str, extra: dict | None = None) -> dict:
+    h = {"Authorization": f"Bearer {token}"}
+    if extra:
+        h.update(extra)
+    return h
+
+def dropbox_upload_bytes(token: str, path: str, data: bytes) -> dict:
+    """
+    /2/files/upload — App’inin erişebildiği alana 'path' ile yükler.
+    path ör: '/AtlasVadi_Faturalar/hello.txt'
+    """
+    url = "https://content.dropboxapi.com/2/files/upload"
+    args = {
+        "path": path,
+        "mode": "add",
+        "autorename": True,
+        "mute": False,
+        "strict_conflict": False
+    }
+    headers = _dbx_headers(token, {
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": json.dumps(args)
+    })
+    resp = requests.post(url, headers=headers, data=data, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Dropbox upload hata: {resp.status_code} — {resp.text}")
+    return resp.json()
+
+def dropbox_create_shared_link(token: str, path: str) -> str:
+    """
+    /2/sharing/create_shared_link_with_settings — kalıcı, tahmin edilemez link.
+    scopes: sharing.write gerekli.
+    """
+    url = "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
+    headers = _dbx_headers(token, {"Content-Type": "application/json"})
+    payload = {
+        "path": path,
+        "settings": {
+            "requested_visibility": "public",  # linke sahip herkes
+            "audience": "public",
+            "access": "viewer"
+        }
+    }
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+    if resp.status_code == 409:
+        # Link zaten varsa, fetch edelim:
+        url2 = "https://api.dropboxapi.com/2/sharing/list_shared_links"
+        payload2 = {"path": path, "direct_only": True}
+        resp2 = requests.post(url2, headers=headers, data=json.dumps(payload2), timeout=60)
+        if resp2.status_code != 200:
+            raise RuntimeError(f"Dropbox shared link liste hata: {resp2.status_code} — {resp2.text}")
+        items = resp2.json().get("links", [])
+        if not items:
+            raise RuntimeError("Dropbox: shared link yok / oluşturulamadı.")
+        return items[0]["url"]
+    if resp.status_code != 200:
+        raise RuntimeError(f"Dropbox shared link hata: {resp.status_code} — {resp.text}")
+    return resp.json()["url"]
+
+def dropbox_get_temporary_link(token: str, path: str) -> str:
+    """
+    /2/files/get_temporary_link — 4 saatlik tekil link (enumerable değil).
+    scopes: files.content.read yeterli.
+    """
+    url = "https://api.dropboxapi.com/2/files/get_temporary_link"
+    headers = _dbx_headers(token, {"Content-Type": "application/json"})
+    payload = {"path": path}
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Dropbox temp link hata: {resp.status_code} — {resp.text}")
+    return resp.json()["link"]
+
+# ---- UI: Dropbox Sağlık Kontrolü + Hızlı Test ----
+st.markdown("### 🔎 Dropbox Bağlantı Testi")
+DBX_TOKEN = st.secrets.get("dropbox", {}).get("access_token", "")
+st.write(f"Dropbox token: {'✅ var' if DBX_TOKEN else '❌ yok (secrets’a ekleyin)'}")
+
+col_t1, col_t2, col_t3 = st.columns(3)
+with col_t1:
+    test_folder = st.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar", help="App türüne göre: 'App folder' ise app köküne göre, 'Full Dropbox' ise tam kök.")
+with col_t2:
+    test_filename = st.text_input("Test dosya adı", value="hello.txt")
+with col_t3:
+    do_test = st.button("🧪 Test yükleme + link")
+
+if do_test:
+    if not DBX_TOKEN:
+        st.error("Dropbox token yok. Secrets’ı düzeltin.")
+    else:
+        try:
+            # Token geçerli mi? Basit bir whoami çağrısı ile bakalım
+            resp = requests.post(
+                "https://api.dropboxapi.com/2/users/get_current_account",
+                headers=_dbx_headers(DBX_TOKEN, {"Content-Type": "application/json"}),
+                timeout=30
+            )
+            if resp.status_code != 200:
+                st.error(f"Token geçersiz / scope eksik: {resp.status_code} — {resp.text}")
+                st.stop()
+
+            # Upload
+            path = f"{test_folder.rstrip('/')}/{test_filename}"
+            meta = dropbox_upload_bytes(DBX_TOKEN, path, b"Merhaba Atlas Vadi!")
+            st.success(f"Yüklendi: {meta.get('path_display')}")
+
+            # Link (kalıcı ve tahmin edilemez) — sharing.write gerekir
+            try:
+                link = dropbox_create_shared_link(DBX_TOKEN, meta["path_lower"])
+                st.write("🔗 Paylaşım linki (kalıcı):", link)
+            except Exception as e1:
+                st.warning(f"Kalıcı link üretilemedi (sharing.write yok olabilir): {e1}")
+                # Geçici link — 4 saat
+                tlink = dropbox_get_temporary_link(DBX_TOKEN, meta["path_lower"])
+                st.write("⏳ Geçici link (4 saat):", tlink)
+
+        except Exception as e:
+            st.error(f"Test hata: {e}")
