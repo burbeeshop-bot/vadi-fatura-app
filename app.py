@@ -604,7 +604,31 @@ def _drive_service():
     sa_dict = dict(st.secrets["gcp_service_account"])
     credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
-
+    
+def drive_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_id: str) -> dict:
+    """Belirtilen klasöre PDF dosyasını yükler (Shared Drive destekli)."""
+    srv = _drive_service()
+    ext = os.path.splitext(original_name)[1] or ".pdf"
+    safe_name = f"{uuid.uuid4().hex}{ext}"  # benzersiz isim
+    media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
+    file_meta = {"name": safe_name, "parents": [parent_folder_id]}
+    try:
+        f = srv.files().create(
+            body=file_meta,
+            media_body=media,
+            fields="id,name,webViewLink,webContentLink,parents,driveId",
+            supportsAllDrives=True
+        ).execute()
+        return f
+    except Exception as e:
+        msg = str(e)
+        if "storageQuotaExceeded" in msg or "Service Accounts do not have storage quota" in msg:
+            raise RuntimeError(
+                "🚫 Servis hesabı kişisel Drive’a yükleme yapamaz. "
+                "Çözüm: Ortak Sürücü oluştur, servis hesabını İçerik yöneticisi yap, "
+                "ve o sürücüdeki klasör ID’yi kullan."
+            )
+        raise
 def drive_check_folder_access(folder_id: str) -> dict:
     """Folder ID servis hesabı tarafından görülebiliyor mu? (Paylaşılan Sürücü desteğiyle kontrol)"""
     srv = _drive_service()
@@ -621,19 +645,24 @@ def drive_check_folder_access(folder_id: str) -> dict:
         raise
 
 def drive_ensure_folder(folder_name: str) -> str:
-    """Servis hesabının kendi Drive’ında klasör bul/oluştur (My Drive)."""
     srv = _drive_service()
-    q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    # Shared Drive'larda da çalışsın:
     res = srv.files().list(
-        q=q, spaces="drive", fields="files(id,name)", pageSize=10,
-        supportsAllDrives=True
+        q=f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+        spaces="drive",
+        fields="files(id,name,driveId,parents)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora="allDrives",
     ).execute()
     files = res.get("files", [])
     if files:
         return files[0]["id"]
     file_meta = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder"}
     folder = srv.files().create(
-        body=file_meta, fields="id",
+        body=file_meta,
+        fields="id,driveId",
         supportsAllDrives=True
     ).execute()
     return folder["id"]
