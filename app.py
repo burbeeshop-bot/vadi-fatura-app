@@ -646,46 +646,61 @@ def dropbox_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_p
                 raise e
             url = links[0].url
 
-    # WhatsApp’ta direkt indirme için dl=1 yapalım (Dropbox linkleri genelde dl=0 gelir)
-    if url.endswith("?dl=0"):
-        url = url[:-5] + "?dl=1"
+   import json, requests  # yoksa ekleyin
 
-    return {"path": dropbox_path, "name": safe_name, "url": url}
+def dropbox_whoami():
+    token = st.secrets["dropbox"]["access_token"]
+    r = requests.post(
+        "https://api.dropboxapi.com/2/users/get_current_account",
+        headers={"Authorization": f"Bearer {token}"}  # body YOK!
+    )
+    return r.status_code, (r.json() if r.ok else r.text)
+
 def dropbox_upload_pdf(pdf_bytes: bytes, dest_path: str):
     token = st.secrets["dropbox"]["access_token"]
-    resp = requests.post(
+    r = requests.post(
         "https://content.dropboxapi.com/2/files/upload",
         headers={
             "Authorization": f"Bearer {token}",
             "Dropbox-API-Arg": json.dumps({
-                "path": dest_path,          # örn: "/AtlasVadi_Faturalar/2025-10/fatura123.pdf"
+                "path": dest_path,
                 "mode": "add",
                 "autorename": True
             }),
             "Content-Type": "application/octet-stream",
         },
-        data=pdf_bytes
+        data=pdf_bytes,
     )
-    resp.raise_for_status()
-    return resp.json()
+    r.raise_for_status()
+    return r.json()
 
-    # 2) Basit upload
-    data = io.BytesIO(b"Merhaba Dropbox!")
-    u = requests.post(
-        "https://content.dropboxapi.com/2/files/upload",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Dropbox-API-Arg": json.dumps({
-                "path": dest_path,           # Örn: /AtlasVadi_Faturalar/hello.txt
-                "mode": "add",
-                "autorename": True
-            }),
-            "Content-Type": "application/octet-stream",
-        },
-        data=data.getvalue()
-    )
-    st.write("upload:", u.status_code)
-    st.code(u.text)
+def dropbox_upload_test(default_folder="/AtlasVadi_Faturalar"):
+    st.subheader("Dropbox testleri")
+    if st.button("🔎 Kimlik testi"):
+        code, payload = dropbox_whoami()
+        st.write("get_current_account:", code)
+        st.json(payload if isinstance(payload, dict) else {"error": payload})
+
+    folder = st.text_input("Klasör yolu", default_folder)
+    if st.button("📄 hello.txt yükle"):
+        resp = requests.post(
+            "https://content.dropboxapi.com/2/files/upload",
+            headers={
+                "Authorization": f"Bearer " + st.secrets["dropbox"]["access_token"],
+                "Dropbox-API-Arg": json.dumps({
+                    "path": f"{folder.rstrip('/')}/hello.txt",
+                    "mode": "add",
+                    "autorename": True
+                }),
+                "Content-Type": "application/octet-stream",
+            },
+            data=b"hello from streamlit",
+        )
+        st.write("upload:", resp.status_code)
+        st.json(resp.json() if resp.ok else {"error": resp.text})
+
+# ⬇️ SADECE UI’ı çizmek için argümansız çağırın
+dropbox_upload_test()
     
 # -----------------------------------------------------------------------------
 # UI — 3 Sekme
