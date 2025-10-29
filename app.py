@@ -1148,12 +1148,12 @@ with tab_d:
 
     st.subheader("🧪 2) Drive servisine bağlan")
     if st.button("🔑 OAuth ile Drive'a bağlan"):
-    try:
+        try:
         srv = drive_service_oauth()
         st.success("OAuth ile Drive bağlantısı kuruldu! 🚀")
         about = srv.about().get(fields="user, storageQuota, user.emailAddress").execute()
         st.json(about)
-    except Exception as e:
+        except Exception as e:
         st.error(f"Bağlantı hatası: {e}")
         st.exception(e)
     if st.button("🔌 Bağlanıp kimlik ve kapsam test et"):
