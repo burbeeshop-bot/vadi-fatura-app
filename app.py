@@ -603,17 +603,17 @@ OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 @st.cache_resource(show_spinner=False)
 def drive_service_oauth():
     flow = InstalledAppFlow.from_client_config(
-        {
-            "installed": {
-                "client_id": st.secrets["google_oauth"]["client_id"],
-                "client_secret": st.secrets["google_oauth"]["client_secret"],
-                "redirect_uris": [st.secrets["google_oauth"]["redirect_uri"]],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=OAUTH_SCOPES
-    )
+    {
+        "installed": {
+            "client_id": st.secrets["oauth_credentials"]["client_id"],
+            "client_secret": st.secrets["oauth_credentials"]["client_secret"],
+            "redirect_uris": [st.secrets["oauth_credentials"]["redirect_uri"]],
+            "auth_uri": st.secrets["oauth_credentials"]["auth_uri"],
+            "token_uri": st.secrets["oauth_credentials"]["token_uri"],
+        }
+    },
+    scopes=_DRIVE_SCOPES,
+)
     creds = flow.run_local_server(port=0)  # Streamlit Cloud'da da çalışır (rastgele port)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
