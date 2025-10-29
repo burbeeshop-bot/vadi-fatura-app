@@ -474,7 +474,7 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     return bio.getvalue()
 
 # =========================================================
-# Rehber Okuyucu (WhatsApp için)
+# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
 # =========================================================
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
@@ -486,9 +486,9 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> Op
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
         row_text = " | ".join(cells)
-        has_blok = "blok" in row_text
+        has_blok  = "blok" in row_text
         has_daire = ("daire no" in row_text) or ("daire  no" in row_text) or ("daire" in row_text) or ("daireno" in row_text)
-        has_tel = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) or ("telefon no" in row_text)
+        has_tel   = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) or ("telefon no" in row_text)
         if has_blok and has_daire and has_tel:
             return i
     return None
@@ -496,46 +496,55 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> Op
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Apsiyon’dan gelen çeşitli başlık yazımlarını standart isimlere çevirir.
-    Hedef kolon adları: Blok, Daire No, Ad Soyad / Unvan, Telefon, (opsiyonel: Tel.Tip)
+    Hedef: Blok, Daire No, Ad Soyad / Unvan, Telefon, (opsiyonel: Tel.Tip)
     """
-    def _norm_rehber(s: str) -> str:
-        return (
-            str(s)
-            .strip().lower()
-            .replace("\n"," ").replace("\r"," ")
-            .replace(".","").replace("_"," ").replace("-"," ")
-        )
-
+    def _n(s: str) -> str:
+        return (str(s).strip().lower()
+                .replace("\n"," ").replace("\r"," ")
+                .replace(".","").replace("_"," ").replace("-"," "))
     mapping = {}
     for c in df.columns:
-        nc = _norm_rehber(c)
-
-        # Blok
+        nc = _n(c)
         if nc in ("blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad"):
             mapping[c] = "Blok"
-
-        # Daire
         elif nc in ("daire no", "daire  no", "daireno", "daire"):
             mapping[c] = "Daire No"
-
-        # Ad Soyad
         elif "ad soyad / unvan" in nc or "ad soyad/unvan" in nc or "ad soyad" in nc or "unvan" in nc:
             mapping[c] = "Ad Soyad / Unvan"
-
-        # Tel Tipi (opsiyonel)
         elif nc in ("tel tip", "tel tipi", "tel tip:", "tel tipi:", "tel tip ", "tel tipi "):
             mapping[c] = "Tel.Tip"
-
-        # Telefon
-        elif (
-            nc in ("telefon", "tel", "cep", "gsm", "telefon no", "telefon no ", "telefon no:", "tel no", "telefon numarasi", "telefon numarası")
-            or "telefon no" in nc
-        ):
+        elif (nc in ("telefon", "tel", "cep", "gsm", "telefon no", "telefon no ", "telefon no:", "tel no", "telefon numarasi", "telefon numarası")
+              or "telefon no" in nc):
             mapping[c] = "Telefon"
-
-        # Diğerleri dokunulmadan kalsın
-
     return df.rename(columns=mapping)
+
+# ——— Yeni: Unicode normalizasyon + içerik bazlı kolon seçici ———
+def _norm_colname(s: str) -> str:
+    # Türkçe karakterleri sadeleştir + küçük harf + gereksizleri temizle
+    t = unicodedata.normalize("NFKD", str(s))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = (t.replace("ı","i").replace("İ","I")
+           .replace("ş","s").replace("Ş","S")
+           .replace("ö","o").replace("Ö","O")
+           .replace("ü","u").replace("Ü","U")
+           .replace("ğ","g").replace("Ğ","G")
+           .replace("ç","c").replace("Ç","C"))
+    t = t.lower()
+    t = re.sub(r"[\.\-_/]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def _pick_col_contains(cols_map: dict, *must_include_any) -> Optional[str]:
+    """
+    Kolon adının normalize hali, verilen anahtar kelimelerden herhangi birini içermeli.
+    Ör: _pick_col_contains(cols_map, "telefon no", "telefon", "tel", "cep", "gsm")
+    """
+    for orig, normed in cols_map.items():
+        for kw in must_include_any:
+            if kw in normed:
+                return orig
+    return None
+
 # =========================================================
 # STREAMLIT UI
 # =========================================================
@@ -782,10 +791,11 @@ with tab_c:
                     continue
                 if not info.filename.lower().endswith(".pdf"):
                     continue
-                # dosya adından DaireID çıkart
                 base = info.filename.rsplit("/",1)[-1]
                 base = base.rsplit("\\",1)[-1]
-                m = re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base) or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base) or re.search(r"([A-Za-z]\d).*?(\d{3})", base)
+                m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
                 daire_id = None
                 if m:
                     try:
@@ -812,28 +822,24 @@ with tab_c:
             st.error(f"Rehber okunamadı: {e}")
             st.stop()
 
-        # Kolon haritalama
-        def _norm_colname(s: str) -> str:
-            return (str(s).strip().lower()
-                    .replace("\n"," ").replace("\r"," ")
-                    .replace(".","").replace("_"," ").replace("-"," "))
+        # Kolon haritalama (akıllı)
         cols_map = {c: _norm_colname(c) for c in raw.columns}
 
-# Blok / Blok Adı
-c_blok = _pick_col(cols_map, "blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad")
+        # Blok (blok / blok adı / blok adi / blokad…)
+        c_blok = _pick_col_contains(cols_map, "blok")
 
-# Daire
-c_dno  = _pick_col(cols_map, "daire no", "daire", "daireno", "daire  no")
+        # Daire (daire no / daireno / daire)
+        c_dno  = _pick_col_contains(cols_map, "daire no", "daireno", "daire")
 
-# Telefon / Telefon No
-c_tel  = _pick_col(cols_map,
-                   "telefon", "telefon no", "tel", "tel no", "telefon numarasi", "telefon numarası",
-                   "cep", "gsm")
+        # Telefon (telefon no / telefon / tel / cep / gsm)
+        c_tel  = _pick_col_contains(cols_map, "telefon no", "telefon", "tel no", "tel", "cep", "gsm")
 
-# Ad Soyad (opsiyonel)
-c_ad   = _pick_col(cols_map, "ad soyad / unvan", "ad soyad/unvan", "ad soyad", "unvan")
+        # Ad Soyad (opsiyonel)
+        c_ad   = _pick_col_contains(cols_map, "ad soyad / unvan", "ad soyad", "unvan")
+
         if not c_blok or not c_dno or not c_tel:
-            st.error("Rehberde en az 'Blok', 'Daire No', 'Telefon' bulunmalıdır.")
+            st.error("Rehberde en az 'Blok', 'Daire No' ve 'Telefon' (Telefon No) başlıkları olmalı.")
+            st.write("Algılanan kolonlar (normalize):", cols_map)
             st.dataframe(raw.head(20), use_container_width=True, height=480)
             st.stop()
 
@@ -855,19 +861,22 @@ c_ad   = _pick_col(cols_map, "ad soyad / unvan", "ad soyad/unvan", "ad soyad", "
             s = re.sub(r"[^\d+]", "", x)
             if s.startswith("+"):
                 return s
-            if re.fullmatch(r"05\d{9}", s):
+            if re.fullmatch(r"05\d{9}", s):   # 05XXXXXXXXX
                 return "+90" + s[1:]
-            if re.fullmatch(r"5\d{9}", s):
+            if re.fullmatch(r"5\d{9}", s):    # 5XXXXXXXXX
                 return "+90" + s
             if re.fullmatch(r"0\d{10,11}", s):
                 return "+90" + s[1:]
+            if re.fullmatch(r"90\d{10}", s):
+                return "+" + s
             return s
         reh["Telefon"] = reh["Telefon"].apply(_quick_norm_phone)
 
         # Eşleştirme
         merged = pdf_df.merge(reh[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
-        base_url = st.session_state.get("wa_base", base_url if 'base_url' in locals() else "")
-        merged["file_url"] = merged["file_name"].apply(lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else "")
+        base_url_state = st.session_state.get("wa_base", "")
+        use_base = base_url_state if base_url_state else base_url
+        merged["file_url"] = merged["file_name"].apply(lambda fn: (use_base.rstrip("/") + "/" + fn) if use_base and use_base.strip() else "")
 
         a1, a2, a3 = st.columns(3)
         with a1:
