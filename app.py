@@ -383,8 +383,11 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
 st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b = st.tabs(["📄 Böl & Alt Yazı", "📊 Apsiyon Gider Doldurucu"])
-
+tab_a, tab_b, tab_c = st.tabs([
+    "📄 Böl & Alt Yazı",
+    "📊 Apsiyon Gider Doldurucu",
+    "📤 WhatsApp Gönderim Hazırlığı"
+])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
 with tab_a:
@@ -863,8 +866,79 @@ with tab_b:
             file_name="Apsiyon_Doldurulmus.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-# =============== TAB C: WhatsApp Gönderim Hazırlığı ===============
+
+
 # =============== TAB C: WhatsApp Gönderim Hazırlığı (GENİŞ UI) ===============
+# ================= TAB C: WhatsApp Gönderim Hazırlığı =================
+with tab_c:
+    st.markdown("<h2 style='margin-top:0'>📤 WhatsApp Gönderim Hazırlığı</h2>", unsafe_allow_html=True)
+
+    up1, up2 = st.columns([1,1], vertical_alignment="top")
+    with up1:
+        st.write("### 1) Rehber (Apsiyon iletişim Excel)")
+        rehber_file = st.file_uploader("Rehberi yükle (.xlsx)", type=["xlsx"], key="wa_rehber")
+        st.caption("Rehber: Apsiyon’dan aldığın iletişim listesini Excel olarak yükle (ham çıktıyı aynen).")
+
+    with up2:
+        st.write("### 2) Bölünmüş PDF klasörü (Drive linki)")
+        drive_folder_url = st.text_input(
+            "Google Drive klasör URL’si",
+            placeholder="https://drive.google.com/drive/folders/XXXXXXXX",
+            key="wa_folder_url"
+        )
+        st.caption("Klasörde adlar **A1-001.pdf** gibi daireID’ye göre olmalı. Klasörü 'Linke sahip herkes görüntüleyebilir' yap.")
+
+    st.divider()
+
+    st.write("### 3) Önizleme")
+    if st.button("🔎 Rehber & dosya eşleşmesini önizle", key="wa_preview"):
+        if not rehber_file:
+            st.warning("Önce rehber Excel’i yükleyin.")
+            st.stop()
+
+        try:
+            rehber_df = load_apsiyon_contacts(rehber_file.read(), rehber_file.name)
+        except Exception as e:
+            st.error(f"Rehber okunamadı: {e}")
+            st.stop()
+
+        # DaireID üret (Blok + Daire No)
+        def _mk_id(row):
+            b = str(row.get("Blok", "")).strip().upper()
+            d = str(row.get("Daire No", "")).strip()
+            d = "".join(ch for ch in d if ch.isdigit())
+            d = d.zfill(3) if d else "000"
+            return f"{b}-{d}"
+
+        rehber_df["DaireID"] = rehber_df.apply(_mk_id, axis=1)
+
+        # WhatsApp linki (önizleme)
+        def _wa_link(tel):
+            tel = "".join(ch for ch in str(tel) if ch.isdigit())
+            if tel.startswith("90"):
+                tel_e164 = f"+{tel}"
+            elif tel.startswith("0"):
+                tel_e164 = f"+90{tel[1:]}"
+            elif tel.startswith("+"):
+                tel_e164 = tel
+            else:
+                tel_e164 = f"+90{tel}"
+            return f"https://wa.me/{tel_e164.lstrip('+')}"
+
+        show_cols = ["Blok", "Daire No", "Ad Soyad / Unvan", "Telefon", "DaireID"]
+        for c in show_cols:
+            if c not in rehber_df.columns:
+                rehber_df[c] = None
+
+        prev = rehber_df[show_cols].copy()
+        prev["WhatsApp"] = prev["Telefon"].apply(_wa_link)
+
+        st.dataframe(prev, use_container_width=True)
+
+        if drive_folder_url:
+            st.success("Hazır! URL butonlu WhatsApp şablonunda bu klasör linkini kullanabilirsin.")
+        else:
+            st.info("Drive klasör URL’sini girersen gönderim listesi tamam olur.")
 import zipfile
 from io import BytesIO
 import re
