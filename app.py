@@ -1,6 +1,3 @@
-SON. YEDEK
-
-
 # app.py
 import io, os, zipfile, re, unicodedata
 from typing import List, Dict
