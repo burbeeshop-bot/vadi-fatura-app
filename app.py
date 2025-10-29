@@ -594,7 +594,28 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
 # ---------------- Drive Helpers (sağlamlaştırılmış) ----------------
 from googleapiclient.errors import HttpError
+# --- OAuth (kendi Google hesabınla) ---
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
+OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+@st.cache_resource(show_spinner=False)
+def drive_service_oauth():
+    flow = InstalledAppFlow.from_client_config(
+        {
+            "installed": {
+                "client_id": st.secrets["google_oauth"]["client_id"],
+                "client_secret": st.secrets["google_oauth"]["client_secret"],
+                "redirect_uris": [st.secrets["google_oauth"]["redirect_uri"]],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }
+        },
+        scopes=OAUTH_SCOPES
+    )
+    creds = flow.run_local_server(port=0)  # Streamlit Cloud'da da çalışır (rastgele port)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 @st.cache_resource(show_spinner=False)
@@ -1126,6 +1147,15 @@ with tab_d:
         st.exception(e)
 
     st.subheader("🧪 2) Drive servisine bağlan")
+    if st.button("🔑 OAuth ile Drive'a bağlan"):
+    try:
+        srv = drive_service_oauth()
+        st.success("OAuth ile Drive bağlantısı kuruldu! 🚀")
+        about = srv.about().get(fields="user, storageQuota, user.emailAddress").execute()
+        st.json(about)
+    except Exception as e:
+        st.error(f"Bağlantı hatası: {e}")
+        st.exception(e)
     if st.button("🔌 Bağlanıp kimlik ve kapsam test et"):
         if not sa_ok:
             st.warning("Önce secrets sorununu düzeltin."); st.stop()
