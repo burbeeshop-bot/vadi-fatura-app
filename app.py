@@ -494,92 +494,48 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> Op
     return None
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apsiyon’dan gelen çeşitli başlık yazımlarını standart isimlere çevirir.
+    Hedef kolon adları: Blok, Daire No, Ad Soyad / Unvan, Telefon, (opsiyonel: Tel.Tip)
+    """
+    def _norm_rehber(s: str) -> str:
+        return (
+            str(s)
+            .strip().lower()
+            .replace("\n"," ").replace("\r"," ")
+            .replace(".","").replace("_"," ").replace("-"," ")
+        )
+
     mapping = {}
     for c in df.columns:
         nc = _norm_rehber(c)
-        if nc == "blok":
+
+        # Blok
+        if nc in ("blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad"):
             mapping[c] = "Blok"
-        elif nc in ("daire no","daire","daireno","daire  no"):
+
+        # Daire
+        elif nc in ("daire no", "daire  no", "daireno", "daire"):
             mapping[c] = "Daire No"
-        elif "ad soyad" in nc or "unvan" in nc or "ad soyad / unvan" in nc:
+
+        # Ad Soyad
+        elif "ad soyad / unvan" in nc or "ad soyad/unvan" in nc or "ad soyad" in nc or "unvan" in nc:
             mapping[c] = "Ad Soyad / Unvan"
-        elif nc in ("tel tip","tel tipi","tel tip.","tel tipi.","tel tipi :","tel tip:","tel tip "):
+
+        # Tel Tipi (opsiyonel)
+        elif nc in ("tel tip", "tel tipi", "tel tip:", "tel tipi:", "tel tip ", "tel tipi "):
             mapping[c] = "Tel.Tip"
-        elif ("telefon" in nc) or (nc == "tel") or ("gsm" in nc) or ("telefon no" in nc) or ("cep" in nc):
+
+        # Telefon
+        elif (
+            nc in ("telefon", "tel", "cep", "gsm", "telefon no", "telefon no ", "telefon no:", "tel no", "telefon numarasi", "telefon numarası")
+            or "telefon no" in nc
+        ):
             mapping[c] = "Telefon"
+
+        # Diğerleri dokunulmadan kalsın
+
     return df.rename(columns=mapping)
-
-def _clean_phone_tr(val) -> Optional[str]:
-    s = re.sub(r"\D", "", str(val))
-    if not s:
-        return None
-    if len(s) == 10:
-        return "+90" + s
-    if len(s) == 11 and s.startswith("0"):
-        return "+90" + s[1:]
-    if len(s) == 12 and s.startswith("90"):
-        return "+" + s
-    if s.startswith("+90") and len(s) == 13:
-        return s
-    return s if s.startswith("+") else ("+" + s)
-
-def _pad3_any(x) -> str:
-    nums = "".join(ch for ch in str(x) if ch.isdigit())
-    return nums.zfill(3) if nums else "000"
-
-def load_apsiyon_contacts(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    from io import BytesIO
-    if filename.lower().endswith(".csv"):
-        raw0 = pd.read_csv(BytesIO(file_bytes), header=None)
-        hdr = _find_header_row_contacts(raw0)
-        df  = pd.read_csv(BytesIO(file_bytes), header=(hdr if hdr is not None else 0))
-    else:
-        raw0 = pd.read_excel(BytesIO(file_bytes), header=None, engine="openpyxl")
-        hdr = _find_header_row_contacts(raw0)
-        df  = pd.read_excel(BytesIO(file_bytes), header=(hdr if hdr is not None else 0), engine="openpyxl")
-
-    df = _map_contact_columns(df)
-
-    missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
-    if missing:
-        st.error(f"Rehberde eksik başlık(lar): {', '.join(missing)}")
-        st.dataframe(df.head(12))
-        raise ValueError("Rehber beklenen başlıkları içermiyor.")
-
-    df["Telefon"] = df["Telefon"].apply(_clean_phone_tr)
-    df["DaireID"] = (
-        df["Blok"].astype(str).str.strip().str.upper()
-        + "-"
-        + df["Daire No"].apply(_pad3_any)
-    )
-    if "Ad Soyad / Unvan" not in df.columns:
-        df["Ad Soyad / Unvan"] = None
-
-    if "Tel.Tip" in df.columns:
-        df["__prio__"] = df["Tel.Tip"].fillna("").astype(str).str.lower().str.contains("cep|gsm")
-        df = (df.sort_values(by=["DaireID","__prio__"])
-                .groupby("DaireID", as_index=False)
-                .agg({
-                    "Blok":"first",
-                    "Daire No":"first",
-                    "Ad Soyad / Unvan":"last",
-                    "Telefon":"last"
-                }))
-        df = df.drop(columns="__prio__", errors="ignore")
-    else:
-        df = (df.groupby("DaireID", as_index=False)
-                .agg({
-                    "Blok":"first",
-                    "Daire No":"first",
-                    "Ad Soyad / Unvan":"last",
-                    "Telefon":lambda x: next((i for i in x[::-1] if pd.notna(i) and i), None)
-                }))
-
-    df["WhatsAppTel"] = df["Telefon"]
-    out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID","WhatsAppTel"]].copy()
-    out["Daire No"] = out["Daire No"].apply(_pad3_any)
-    return out
-
 # =========================================================
 # STREAMLIT UI
 # =========================================================
@@ -863,17 +819,19 @@ with tab_c:
                     .replace(".","").replace("_"," ").replace("-"," "))
         cols_map = {c: _norm_colname(c) for c in raw.columns}
 
-        def _pick_col(cols_map: dict, *cands) -> Optional[str]:
-            for orig, normed in cols_map.items():
-                if normed in cands:
-                    return orig
-            return None
+# Blok / Blok Adı
+c_blok = _pick_col(cols_map, "blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad")
 
-        c_blok = _pick_col(cols_map, "blok")
-        c_dno  = _pick_col(cols_map, "daire no","daire","daireno","daire  no")
-        c_tel  = _pick_col(cols_map, "telefon","tel","cep","tel no","telefon no","gsm")
-        c_ad   = _pick_col(cols_map, "ad soyad","ad soyad / unvan","ad soyad/unvan","unvan")
+# Daire
+c_dno  = _pick_col(cols_map, "daire no", "daire", "daireno", "daire  no")
 
+# Telefon / Telefon No
+c_tel  = _pick_col(cols_map,
+                   "telefon", "telefon no", "tel", "tel no", "telefon numarasi", "telefon numarası",
+                   "cep", "gsm")
+
+# Ad Soyad (opsiyonel)
+c_ad   = _pick_col(cols_map, "ad soyad / unvan", "ad soyad/unvan", "ad soyad", "unvan")
         if not c_blok or not c_dno or not c_tel:
             st.error("Rehberde en az 'Blok', 'Daire No', 'Telefon' bulunmalıdır.")
             st.dataframe(raw.head(20), use_container_width=True, height=480)
