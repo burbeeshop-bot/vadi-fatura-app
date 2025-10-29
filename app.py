@@ -938,7 +938,7 @@ with tab_c:
                 language="text"
             )
 
-        # ------ Drive’a yükle ve UUID link ver ------
+               # ------ Drive’a yükle ve UUID link ver ------
         st.markdown("### 🔐 Drive’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
         with st.expander("Drive yükleme (dosya düzeyinde 'anyone with link')", expanded=False):
             dcol = st.columns([2,2,1])
@@ -961,21 +961,27 @@ with tab_c:
                         with st.spinner("Servis hesabı Drive'ında klasör hazırlanıyor..."):
                             target_folder_id = drive_ensure_folder(drive_folder_name)
                 except Exception as e:
-                    st.error(f"Drive servisi hatası: {e}"); st.stop()
+                    st.error(f"Drive servisi hatası: {e}")
+                    st.stop()
 
                 try:
                     zf = zipfile.ZipFile(zip_up)
                 except Exception as e:
-                    st.error(f"ZIP açılamadı: {e}"); st.stop()
+                    st.error(f"ZIP açılamadı: {e}")
+                    st.stop()
 
                 pdf_infos = [i for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf")]
                 if not pdf_infos:
-                    st.error("ZIP içinde PDF yok."); st.stop()
+                    st.error("ZIP içinde PDF yok.")
+                    st.stop()
 
+                # 🔄 İlerleme durumu göstergesi
                 uploaded_map = {}
-                progress = st.progress(0)
                 total = len(pdf_infos)
                 done = 0
+                progress = st.progress(0)
+                status_text = st.empty()
+                st.write(f"🚀 {total} dosya yükleniyor, lütfen bekleyin...")
 
                 for info in pdf_infos:
                     base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
@@ -986,17 +992,22 @@ with tab_c:
                         drive_share_anyone_reader(meta["id"])
                         link = meta.get("webViewLink") or meta.get("webContentLink")
                         uploaded_map[base] = link
+                        done += 1
+                        progress.progress(done / total)
+                        status_text.text(f"✅ {done}/{total} yüklendi: {base}")
                     except Exception as e:
-                        st.warning(f"Yükleme hatası ({base}): {e}")
-                    done += 1
-                    progress.progress(done/total)
+                        st.warning(f"⚠️ {base} yüklenemedi: {e}")
 
-                st.success(f"Yükleme tamam: {done}/{total}")
+                st.success(f"Yükleme tamamlandı ({done}/{total}).")
+                status_text.text("✅ Tüm PDF’ler başarıyla yüklendi!")
 
                 # merged'e linkleri yaz
                 if "file_url" not in merged.columns:
                     merged["file_url"] = ""
-                merged["file_url"] = merged.apply(lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1)
+                merged["file_url"] = merged.apply(
+                    lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")),
+                    axis=1
+                )
 
                 st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
                              use_container_width=True, height=600)
@@ -1010,8 +1021,21 @@ with tab_c:
                 })[["phone","name","daire_id","file_name","file_url"]]
                 b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
                 st.download_button("📥 WhatsApp_Recipients.csv (Drive UUID linkli)", b_csv2,
-                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
+                                   file_name="WhatsApp_Recipients.csv",
+                                   mime="text/csv", use_container_width=True)
 
-                st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
+                st.download_button("📥 uploaded_map.json",
+                                   json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
                                    file_name="uploaded_map.json")
-                st.info("Her dosya UUID isimli ve yalnızca dosya bazında paylaşıldı. Klasör herkese açılmadı, tahmin edilemez.")
+
+                st.info("Her dosya benzersiz UUID ile adlandırıldı ve yalnızca dosya bazında paylaşıldı. Klasör herkese açılmadı, tahmin edilemez.")
+
+                # 🔍 Hızlı test butonu (API erişimi)
+                if st.button("🔍 Drive bağlantı testi", use_container_width=True):
+                    try:
+                        srv = _drive_service()
+                        about = srv.about().get(fields="user, storageQuota").execute()
+                        st.json(about)
+                        st.success("Drive API bağlantısı OK ✅")
+                    except Exception as e:
+                        st.error(f"Drive bağlantı hatası: {e}")
