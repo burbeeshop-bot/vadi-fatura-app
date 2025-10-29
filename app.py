@@ -1156,6 +1156,8 @@ with tab_d:
     except Exception as e:
         st.error(f"Bağlantı hatası: {e}")
         st.exception(e)
+        st.error(f"Bağlantı hatası: {e}")
+        st.exception(e)
     if st.button("🔌 Bağlanıp kimlik ve kapsam test et"):
         if not sa_ok:
             st.warning("Önce secrets sorununu düzeltin."); st.stop()
