@@ -651,21 +651,23 @@ def dropbox_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_p
         url = url[:-5] + "?dl=1"
 
     return {"path": dropbox_path, "name": safe_name, "url": url}
-def dropbox_upload_test(dest_path="/AtlasVadi_Faturalar/hello.txt"):
-    """Dropbox token ve yükleme testi (hello.txt yükler)."""
+def dropbox_upload_pdf(pdf_bytes: bytes, dest_path: str):
     token = st.secrets["dropbox"]["access_token"]
-
-    # 1) Token / kimlik testi — BOŞ JSON GÖNDERMEK ŞART
-    r = requests.post(
-        "https://api.dropboxapi.com/2/users/get_current_account",
+    resp = requests.post(
+        "https://content.dropboxapi.com/2/files/upload",
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Dropbox-API-Arg": json.dumps({
+                "path": dest_path,          # örn: "/AtlasVadi_Faturalar/2025-10/fatura123.pdf"
+                "mode": "add",
+                "autorename": True
+            }),
+            "Content-Type": "application/octet-stream",
         },
-        data="{}"
+        data=pdf_bytes
     )
-    st.write("get_current_account:", r.status_code)
-    st.code(r.text)
+    resp.raise_for_status()
+    return resp.json()
 
     # 2) Basit upload
     data = io.BytesIO(b"Merhaba Dropbox!")
