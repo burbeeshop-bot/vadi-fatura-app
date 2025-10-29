@@ -669,7 +669,150 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Sheet1")
     return bio.getvalue()
+# --------- Apsiyon Rehber Okuyucu (esnek başlık & temiz telefon) ---------
+import re
+from io import BytesIO
 
+def _norm_rehber(s: str) -> str:
+    return (
+        str(s)
+        .strip()
+        .lower()
+        .replace("\n"," ")
+        .replace("\r"," ")
+        .replace(".","")
+        .replace("_"," ")
+        .replace("-"," ")
+    )
+
+def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 20) -> int | None:
+    """
+    İlk 'search_rows' satırda BLok + (Daire/Daire No) + (Telefon/Tel/Cep/GSM) birlikte görünen satırı başlık kabul eder.
+    """
+    limit = min(search_rows, len(df_raw))
+    for i in range(limit):
+        cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
+        row_text = " | ".join(cells)
+        has_blok   = "blok" in row_text
+        has_daire  = ("daire no" in row_text) or ("daire  no" in row_text) or ("daire" in row_text) or ("daireno" in row_text)
+        has_tel    = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) or ("telefon no" in row_text)
+        if has_blok and has_daire and has_tel:
+            return i
+    return None
+
+def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apsiyon’dan gelen çeşitli başlık yazımlarını standart isimlere çevirir.
+    """
+    mapping = {}
+    for c in df.columns:
+        nc = _norm_rehber(c)
+        if nc == "blok":
+            mapping[c] = "Blok"
+        elif nc in ("daire no","daire","daireno","daire  no"):
+            mapping[c] = "Daire No"
+        elif "ad soyad" in nc or "unvan" in nc or "ad soyad / unvan" in nc:
+            mapping[c] = "Ad Soyad / Unvan"
+        elif nc in ("tel tip","tel tipi","tel tip.","tel tipi.","tel tipi :","tel tip:","tel tip "):
+            mapping[c] = "Tel.Tip"
+        elif ("telefon" in nc) or (nc == "tel") or ("gsm" in nc) or ("telefon no" in nc) or ("cep" in nc):
+            mapping[c] = "Telefon"
+        # diğer kolonlar dokunulmadan kalır
+    return df.rename(columns=mapping)
+
+def _clean_phone_tr(val) -> str | None:
+    """
+    Telefonu +90XXXXXXXXXX biçimine normalize eder.
+    """
+    s = re.sub(r"\D", "", str(val))  # sadece rakam
+    if not s:
+        return None
+    if len(s) == 10:                 # 5XXXXXXXXX
+        return "+90" + s
+    if len(s) == 11 and s.startswith("0"):  # 05XXXXXXXXX
+        return "+90" + s[1:]
+    if len(s) == 12 and s.startswith("90"):
+        return "+" + s
+    if s.startswith("+90") and len(s) == 13:
+        return s
+    # Son çare: + ekle
+    return s if s.startswith("+") else ("+" + s)
+
+def _pad3_any(x) -> str:
+    nums = "".join(ch for ch in str(x) if ch.isdigit())
+    return nums.zfill(3) if nums else "000"
+
+def load_apsiyon_contacts(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Apsiyon'dan alınan 'AtlasVadiSitesi_Daireiletisimbilgileri_*.xlsx' dosyasını okur.
+    Dönen kolonlar: [Blok, Daire No, Ad Soyad / Unvan, Telefon, DaireID, WhatsAppTel]
+    """
+    # ham oku ve header satırını bul
+    if filename.lower().endswith(".csv"):
+        raw = pd.read_csv(BytesIO(file_bytes), header=None)
+        hdr = _find_header_row_contacts(raw)
+        df  = pd.read_csv(BytesIO(file_bytes), header=(hdr if hdr is not None else 0))
+    else:
+        raw = pd.read_excel(BytesIO(file_bytes), header=None, engine="openpyxl")
+        hdr = _find_header_row_contacts(raw)
+        df  = pd.read_excel(BytesIO(file_bytes), header=(hdr if hdr is not None else 0), engine="openpyxl")
+
+    # kolonları eşle
+    df = _map_contact_columns(df)
+
+    # zorunlu kolonlar kontrol
+    missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
+    if missing:
+        st.error(f"Rehberde eksik başlık(lar): {', '.join(missing)}")
+        st.dataframe(df.head(12))
+        raise ValueError("Rehber beklenen başlıkları içermiyor.")
+
+    # Telefon normalize (+90…)
+    df["Telefon"] = df["Telefon"].apply(_clean_phone_tr)
+
+    # DaireID üret
+    df["DaireID"] = (
+        df["Blok"].astype(str).str.strip().str.upper()
+        + "-"
+        + df["Daire No"].apply(_pad3_any)
+    )
+
+    # Ad/Soyad yoksa boş kalsın
+    if "Ad Soyad / Unvan" not in df.columns:
+        df["Ad Soyad / Unvan"] = None
+
+    # Yinelenen daireler: Tel.Tip varsa 'Cep' öncelik, yoksa son dolu telefonu al
+    if "Tel.Tip" in df.columns:
+        df["__prio__"] = df["Tel.Tip"].fillna("").astype(str).str.lower().str.contains("cep|gsm")
+        df = (df
+              .sort_values(by=["DaireID","__prio__"])  # False<True, yani cep/gsm en sonda; sonra groupby last()
+              .groupby("DaireID", as_index=False)
+              .agg({
+                  "Blok":"first",
+                  "Daire No":"first",
+                  "Ad Soyad / Unvan":"last",
+                  "Telefon":"last"
+              }))
+        if "__prio__" in df.columns:
+            df = df.drop(columns="__prio__", errors="ignore")
+    else:
+        df = (df
+              .groupby("DaireID", as_index=False)
+              .agg({
+                  "Blok":"first",
+                  "Daire No":"first",
+                  "Ad Soyad / Unvan":"last",
+                  "Telefon":lambda x: next((i for i in x[::-1] if pd.notna(i) and i), None)
+              }))
+
+    # WhatsAppTel = Telefon (ayrı kolonda da tutalım)
+    df["WhatsAppTel"] = df["Telefon"]
+
+    # Sadece gereken kolonlar ve sıralama
+    out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID","WhatsAppTel"]].copy()
+    # Daire No'yu string 3 hane göster
+    out["Daire No"] = out["Daire No"].apply(_pad3_any)
+    return out
 # ---------- Streamlit UI entegrasyonu ----------
 with tab_b:
     st.subheader("📊 Apsiyon Gider Doldurucu")
