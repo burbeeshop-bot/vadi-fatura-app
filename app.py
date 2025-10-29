@@ -1,6 +1,6 @@
 # app.py
-# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive UUID Upload entegre) ===
-import io, os, re, zipfile, unicodedata, uuid, json
+# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive UUID Upload + 1-2-3-4 Tanı Paneli) ===
+import io, os, re, zipfile, unicodedata, uuid, json, time
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
@@ -10,6 +10,7 @@ import pandas as pd
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -41,7 +42,7 @@ except Exception:
     pass
 
 # -----------------------------------------------------------------------------
-# Yardımcılar (genel)
+# Küçük yardımcılar
 # -----------------------------------------------------------------------------
 def _pad3_digits(s: str) -> str:
     s = "".join(ch for ch in str(s) if ch.isdigit())
@@ -57,7 +58,6 @@ def _to_float_tr(s: str) -> float:
         return 0.0
 
 def _normalize_tr(t: str) -> str:
-    """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
         return ""
     t = unicodedata.normalize("NFKD", t)
@@ -76,6 +76,20 @@ def _norm_colname(s: str) -> str:
     return (str(s).strip().lower()
             .replace("\n"," ").replace("\r"," ")
             .replace(".","").replace("_"," ").replace("-"," "))
+
+def _mask_email(e: str) -> str:
+    if not e: return "(yok)"
+    parts = e.split("@")
+    if len(parts) != 2: return e
+    name, dom = parts
+    if len(name) <= 2: mname = name[0] + "*"
+    else: mname = name[0] + ("*"*(len(name)-2)) + name[-1]
+    return f"{mname}@{dom}"
+
+def _mask(s: str, keep: int = 6) -> str:
+    if not s: return "(yok)"
+    if len(s) <= keep: return "*"*len(s)
+    return s[:keep] + "*"*(len(s)-keep)
 
 # -----------------------------------------------------------------------------
 # Alt Yazı (wrap & overlay)
@@ -476,7 +490,7 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     return bio.getvalue()
 
 # -----------------------------------------------------------------------------
-# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
+# Rehber Okuyucu (WhatsApp için)
 # -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
@@ -484,9 +498,6 @@ def _norm_rehber(s: str) -> str:
             .replace(".","").replace("_"," ").replace("-"," "))
 
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
-    """
-    'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
-    """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
@@ -499,10 +510,6 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Op
     return None
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apsiyon’dan gelen başlıkları standart isimlere çevirir:
-    Hedef: Blok, Daire No, Ad Soyad / Unvan (ops), Tel.Tip (ops), Telefon
-    """
     mapping = {}
     for c in df.columns:
         nc = _norm_rehber(c)
@@ -519,14 +526,8 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Apsiyon çıktısını (başta 'Atlas Vadi Sitesi' ve 'Unnamed:' kolonları olsa bile)
-    otomatik başlık satırı tespitiyle okur ve standart kolonlara map eder.
-    Dönen kolonlar en az: Blok, Daire No, Telefon (+ opsiyonel: Ad Soyad / Unvan)
-    """
     from io import BytesIO
 
-    # 1) Ham oku (header=None) ve başlığı bul
     if filename.lower().endswith(".csv"):
         raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
     else:
@@ -537,13 +538,11 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
         hdr = 0
 
-    # 2) Başlıkla tekrar oku
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(BytesIO(file_bytes), header=hdr, dtype=str)
     else:
         df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
 
-    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
     if hdr > 0:
         upper = raw.iloc[hdr-1]
         new_cols = []
@@ -558,13 +557,9 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
             new_cols.append(name)
         df.columns = new_cols
 
-    # 4) Tamamen boş kolonları at
     df = df.dropna(axis=1, how="all")
-
-    # 5) Kolon adlarını standart isimlere map et
     df = _map_contact_columns(df)
 
-    # 6) Zorunlu kolon kontrolü
     missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
     if missing:
         cols_map_debug = {c: _norm_colname(c) for c in df.columns}
@@ -573,9 +568,7 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.dataframe(df.head(20), use_container_width=True)
         raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
-    # 7) Temizlik ve DaireID üret
     def _pad3_for_merge(x) -> str:
-        digits = "".join(ch for ch in str(x or "") if x is not None and str(x))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
 
@@ -600,15 +593,18 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Google Drive (Service Account) Helpers
+# Google Drive (Service Account) Helpers + Tanı
 # -----------------------------------------------------------------------------
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-@st.cache_resource(show_spinner=False)
-def _drive_service():
+def _load_sa_from_secrets() -> dict:
     if "gcp_service_account" not in st.secrets:
         raise RuntimeError("Streamlit secrets içinde 'gcp_service_account' bulunamadı.")
-    sa_dict = dict(st.secrets["gcp_service_account"])
+    return dict(st.secrets["gcp_service_account"])
+
+@st.cache_resource(show_spinner=False)
+def _drive_service():
+    sa_dict = _load_sa_from_secrets()
     credentials = service_account.Credentials.from_service_account_info(sa_dict, scopes=_DRIVE_SCOPES)
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
@@ -626,10 +622,10 @@ def drive_ensure_folder(folder_name: str) -> str:
 def drive_upload_pdf(bytes_io: io.BytesIO, original_name: str, parent_folder_id: str) -> dict:
     srv = _drive_service()
     ext = os.path.splitext(original_name)[1] or ".pdf"
-    safe_name = f"{uuid.uuid4().hex}{ext}"  # tahmin edilemez
+    safe_name = f"{uuid.uuid4().hex}{ext}"
     media = MediaIoBaseUpload(bytes_io, mimetype="application/pdf", resumable=False)
     file_meta = {"name": safe_name, "parents": [parent_folder_id]}
-    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink").execute()
+    f = srv.files().create(body=file_meta, media_body=media, fields="id,name,webViewLink,webContentLink,parents").execute()
     return f
 
 def drive_share_anyone_reader(file_id: str) -> None:
@@ -640,15 +636,24 @@ def drive_share_anyone_reader(file_id: str) -> None:
     except Exception:
         pass
 
+def drive_get_file(file_id: str) -> dict:
+    srv = _drive_service()
+    return srv.files().get(fileId=file_id, fields="id,name,parents,webViewLink,webContentLink").execute()
+
+def drive_check_folder_access(folder_id: str) -> dict:
+    srv = _drive_service()
+    return srv.files().get(fileId=folder_id, fields="id,name,mimeType,permissions,owners,parents").execute()
+
 # -----------------------------------------------------------------------------
-# UI — 3 Sekme
+# UI — 4 Sekme (Tanı paneli eklendi)
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c = st.tabs([
+tab_a, tab_b, tab_c, tab_d = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
-    "📤 WhatsApp Gönderim Hazırlığı"
+    "📤 WhatsApp Gönderim Hazırlığı",
+    "🧪 Drive Tanı (1-2-3-4)"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
@@ -841,7 +846,7 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
+# ---------------- TAB C: WhatsApp Gönderim Hazırlığı (manuel base URL veya Drive UUID Upload) ----------------
 with tab_c:
     st.markdown("""
     <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
@@ -873,7 +878,6 @@ with tab_c:
         if not rehber_up:
             st.warning("Önce Rehber dosyası yükleyin."); st.stop()
 
-        # ZIP → PDF listesi + DaireID çıkar
         try:
             zf = zipfile.ZipFile(zip_up)
             pdf_rows = []
@@ -898,13 +902,11 @@ with tab_c:
         if pdf_df.empty:
             st.error("ZIP’te PDF bulunamadı."); st.stop()
 
-        # Rehber oku (sağlam yol)
         try:
             rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
         except Exception as e:
             st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
 
-        # Eşleştirme
         merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
         merged["file_url"] = merged["file_name"].apply(
             lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
@@ -938,7 +940,7 @@ with tab_c:
                 language="text"
             )
 
-               # ------ Drive’a yükle ve UUID link ver ------
+        # ------ Drive’a yükle ve UUID link ver ------
         st.markdown("### 🔐 Drive’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
         with st.expander("Drive yükleme (dosya düzeyinde 'anyone with link')", expanded=False):
             dcol = st.columns([2,2,1])
@@ -946,42 +948,52 @@ with tab_c:
             folder_id_input   = dcol[1].text_input("Opsiyonel: Varolan klasör ID (kendi Drive’ında, serv. hesabına Editor ver)", value="")
             upload_btn = dcol[2].button("☁️ Yükle", use_container_width=True)
 
-            # Servis hesabı görüntüle (bilgi)
-            st.caption(f"Servis hesabı: {st.secrets.get('gcp_service_account', {}).get('client_email','(secrets yok)')}")
+            st.caption(f"Servis hesabı: {_mask_email(_load_sa_from_secrets().get('client_email'))}")
 
             if upload_btn:
+                logs = []
+                def log(msg): logs.append(msg)
+
                 if not zip_up:
                     st.warning("Önce ZIP yükleyin."); st.stop()
 
                 try:
                     if folder_id_input.strip():
                         target_folder_id = folder_id_input.strip()
-                        st.info("Belirtilen klasöre yükleniyor. Bu klasörü servis hesabı e-postasıyla **Editor** paylaştığınızdan emin olun.")
+                        log(f"Varolan klasöre yükleme: {target_folder_id}")
+                        try:
+                            meta = drive_check_folder_access(target_folder_id)
+                            log(f"Klasör adı: {meta.get('name')} | mimeType: {meta.get('mimeType')}")
+                        except Exception as e:
+                            log(f"Klasör kontrolü başarısız: {e}")
                     else:
                         with st.spinner("Servis hesabı Drive'ında klasör hazırlanıyor..."):
                             target_folder_id = drive_ensure_folder(drive_folder_name)
+                            log(f"Oluşturulan/tespit edilen klasör ID: {target_folder_id}")
                 except Exception as e:
-                    st.error(f"Drive servisi hatası: {e}")
+                    st.error("Drive servisine bağlanamadı.")
+                    st.exception(e)
+                    st.code("\n".join(logs))
                     st.stop()
 
                 try:
                     zf = zipfile.ZipFile(zip_up)
                 except Exception as e:
-                    st.error(f"ZIP açılamadı: {e}")
+                    st.error("ZIP açılamadı.")
+                    st.exception(e)
+                    st.code("\n".join(logs))
                     st.stop()
 
                 pdf_infos = [i for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf")]
                 if not pdf_infos:
                     st.error("ZIP içinde PDF yok.")
+                    st.code("\n".join(logs))
                     st.stop()
 
-                # 🔄 İlerleme durumu göstergesi
                 uploaded_map = {}
+                progress = st.progress(0)
                 total = len(pdf_infos)
                 done = 0
-                progress = st.progress(0)
-                status_text = st.empty()
-                st.write(f"🚀 {total} dosya yükleniyor, lütfen bekleyin...")
 
                 for info in pdf_infos:
                     base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
@@ -992,22 +1004,21 @@ with tab_c:
                         drive_share_anyone_reader(meta["id"])
                         link = meta.get("webViewLink") or meta.get("webContentLink")
                         uploaded_map[base] = link
-                        done += 1
-                        progress.progress(done / total)
-                        status_text.text(f"✅ {done}/{total} yüklendi: {base}")
+                        log(f"OK: {base} -> {meta.get('name')} | {link}")
+                    except HttpError as he:
+                        log(f"HttpError: {base} -> {he}")
+                        st.warning(f"Yükleme hatası (HttpError) — {base}: {he}")
                     except Exception as e:
-                        st.warning(f"⚠️ {base} yüklenemedi: {e}")
+                        log(f"EXC: {base} -> {e}")
+                        st.warning(f"Yükleme hatası — {base}: {e}")
+                    done += 1
+                    progress.progress(done/total)
 
-                st.success(f"Yükleme tamamlandı ({done}/{total}).")
-                status_text.text("✅ Tüm PDF’ler başarıyla yüklendi!")
+                st.success(f"Yükleme tamam: {done}/{total}")
 
-                # merged'e linkleri yaz
                 if "file_url" not in merged.columns:
                     merged["file_url"] = ""
-                merged["file_url"] = merged.apply(
-                    lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")),
-                    axis=1
-                )
+                merged["file_url"] = merged.apply(lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1)
 
                 st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
                              use_container_width=True, height=600)
@@ -1021,21 +1032,86 @@ with tab_c:
                 })[["phone","name","daire_id","file_name","file_url"]]
                 b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
                 st.download_button("📥 WhatsApp_Recipients.csv (Drive UUID linkli)", b_csv2,
-                                   file_name="WhatsApp_Recipients.csv",
-                                   mime="text/csv", use_container_width=True)
+                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
 
-                st.download_button("📥 uploaded_map.json",
-                                   json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
+                st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
                                    file_name="uploaded_map.json")
 
-                st.info("Her dosya benzersiz UUID ile adlandırıldı ve yalnızca dosya bazında paylaşıldı. Klasör herkese açılmadı, tahmin edilemez.")
+                with st.expander("📜 Yükleme Logu", expanded=False):
+                    st.code("\n".join(logs) or "(log boş)")
 
-                # 🔍 Hızlı test butonu (API erişimi)
-                if st.button("🔍 Drive bağlantı testi", use_container_width=True):
-                    try:
-                        srv = _drive_service()
-                        about = srv.about().get(fields="user, storageQuota").execute()
-                        st.json(about)
-                        st.success("Drive API bağlantısı OK ✅")
-                    except Exception as e:
-                        st.error(f"Drive bağlantı hatası: {e}")
+# ---------------- TAB D: Drive Tanı (1-2-3-4) ----------------
+with tab_d:
+    st.subheader("🧪 1) About (secrets & servis hesabı)")
+
+    sa_ok = True
+    try:
+        sa = _load_sa_from_secrets()
+        st.write("**project_id:**", _mask(sa.get("project_id","")))
+        st.write("**client_email:**", _mask_email(sa.get("client_email","")))
+        st.write("**token_uri:**", sa.get("token_uri",""))
+    except Exception as e:
+        sa_ok = False
+        st.error("secrets okunamadı / gcp_service_account yok.")
+        st.exception(e)
+
+    st.subheader("🧪 2) Drive servisine bağlan")
+    if st.button("🔌 Bağlanıp kimlik ve kapsam test et"):
+        if not sa_ok:
+            st.warning("Önce secrets sorununu düzeltin."); st.stop()
+        try:
+            srv = _drive_service()
+            st.success("Drive servisine bağlandı.")
+            st.write("Basit liste denemesi (0 sonuç olabilir, amaç yetki testidir):")
+            res = srv.files().list(pageSize=1, fields="files(id,name)").execute()
+            st.json(res)
+        except Exception as e:
+            st.error("Drive servisine bağlanılamadı.")
+            st.exception(e)
+
+    st.subheader("🧪 3) Klasör erişim testi")
+    c1,c2 = st.columns([2,1])
+    folder_id_test = c1.text_input("Varolan klasör ID (kendi Drive'ınız)", value="", help="Bu klasöre servis hesabına 'Editor' payı verdiniz mi?")
+    do_folder_check = c2.button("📂 Kontrol et")
+    if do_folder_check and folder_id_test.strip():
+        try:
+            meta = drive_check_folder_access(folder_id_test.strip())
+            st.success("Klasör erişimi mümkün.")
+            st.json(meta)
+        except HttpError as he:
+            st.error("HTTP hata (yetki/paylaşım?):")
+            st.code(str(he))
+        except Exception as e:
+            st.error("Klasör kontrolü başarısız.")
+            st.exception(e)
+
+    st.subheader("🧪 4) Test yükleme (küçük bir txt)")
+    c3,c4 = st.columns([2,1])
+    folder_id_for_upload = c3.text_input("Klasör ID (test yükleme için)", value="", help="Servis hesabına 'Editor' payı verilmiş olmalı.")
+    do_test_upload = c4.button("⬆️ Test dosyası yükle")
+    if do_test_upload:
+        if not folder_id_for_upload.strip():
+            st.warning("Klasör ID girin.")
+        else:
+            try:
+                # küçük bir metin dosyası pdf yerine
+                content = f"Atlas Vadi test yükleme {time.time()}"
+                bio = io.BytesIO(content.encode("utf-8"))
+                # PDF bekleyen yardımcı yerine doğrudan create çağıracağız (text/plain)
+                srv = _drive_service()
+                meta = srv.files().create(
+                    body={"name": f"test-{uuid.uuid4().hex}.txt", "parents": [folder_id_for_upload.strip()]},
+                    media_body=MediaIoBaseUpload(bio, mimetype="text/plain", resumable=False),
+                    fields="id,name,webViewLink,parents"
+                ).execute()
+                # paylaş
+                drive_share_anyone_reader(meta["id"])
+                file_meta = drive_get_file(meta["id"])
+                st.success("Test dosyası yüklendi ve paylaşıldı.")
+                st.json(file_meta)
+            except HttpError as he:
+                st.error("HTTP hata — muhtemelen klasöre yetki verilmemiştir (servis hesabına Editor).")
+                st.code(str(he))
+            except Exception as e:
+                st.error("Test yükleme hatası.")
+                st.exception(e)
