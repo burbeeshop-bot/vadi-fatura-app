@@ -380,7 +380,7 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
 # =========================================================
 #  S T R E A M L I T   U I
 # =========================================================
-st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="centered")
+st.set_page_config(page_title="Fatura • Atlas Vadi", page_icon="🧾", layout="wide")
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
 tab_a, tab_b = st.tabs(["📄 Böl & Alt Yazı", "📊 Apsiyon Gider Doldurucu"])
@@ -721,6 +721,7 @@ with tab_b:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 # =============== TAB C: WhatsApp Gönderim Hazırlığı ===============
+# =============== TAB C: WhatsApp Gönderim Hazırlığı (GENİŞ UI) ===============
 import zipfile
 from io import BytesIO
 import re
@@ -741,26 +742,14 @@ def _pad3_for_merge(x) -> str:
     return digits.zfill(3) if digits else ""
 
 def _extract_daire_from_filename(name: str) -> str | None:
-    """
-    'A1-007.pdf' -> A1-007
-    Esneklik: a1_7.pdf, A1-7.PDF vb.
-    """
     base = name.rsplit("/",1)[-1]
     base = base.rsplit("\\",1)[-1]
-    base_low = base.lower()
-    # önce A1-007 tarzı
     m = re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
     if m:
-        blk = m.group(1).upper()
-        dno = f"{int(m.group(2)):03d}"
-        return f"{blk}-{dno}"
-    # sonra A1 7 gibi boşluklu
+        return f"{m.group(1).upper()}-{int(m.group(2)):03d}"
     m = re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
     if m:
-        blk = m.group(1).upper()
-        dno = f"{int(m.group(2)):03d}"
-        return f"{blk}-{dno}"
-    # son çare: sadece 3 hane ve blok başta
+        return f"{m.group(1).upper()}-{int(m.group(2)):03d}"
     m = re.search(r"([A-Za-z]\d).*?(\d{3})", base)
     if m:
         return f"{m.group(1).upper()}-{m.group(2)}"
@@ -768,17 +757,32 @@ def _extract_daire_from_filename(name: str) -> str | None:
 
 tab_c = st.tabs(["📤 WhatsApp Gönderim Hazırlığı"])[0]
 with tab_c:
-    st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
-    zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip")
+    st.markdown("""
+    <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
+      <img src='https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg' width='28'>
+      <h3 style='margin:0;'>WhatsApp Gönderim Hazırlığı</h3>
+    </div>
+    """, unsafe_allow_html=True)
+    # 2 sütunlu daha ferah yükleme alanı
+    up1, up2 = st.columns([1,1], vertical_alignment="top")
+    with up1:
+        st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
+        zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip", label_visibility="collapsed")
+    with up2:
+        st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (XLSX/CSV). En az `Blok`, `Daire No`, `Telefon` olmalı.")
+        rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber", label_visibility="collapsed")
 
-    st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (XLSX/CSV). En az `Blok`, `Daire No`, `Telefon` olmalı.")
-    rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber")
+    with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
+        base_url = st.text_input("Base URL (örn: https://cdn.site.com/faturalar/ )", value="")
+        st.caption("Eğer dosyaları aynı adlarla bir sunucuya koyacaksan, link = base_url + dosya_adı şeklinde otomatik oluşur.")
 
-    st.markdown("**Adım 3 (opsiyonel):** Dosya linkini otomatik üretmek istersen **taban URL** ver:")
-    base_url = st.text_input("Base URL (opsiyonel; örn: https://cdn.site.com/faturalar/ )", value="")
-    st.caption("Eğer dosyaları bir statik sunucuya aynı adlarla yükleyeceksen, link = base_url + dosya_adı şeklinde otomatik doldurulur. Google Drive için genellikle tek tek link gerekir, onu sonradan CSV’ye yapıştırabilirsin.")
+    ctop1, ctop2 = st.columns([1,3], vertical_alignment="center")
+    with ctop1:
+        go_btn = st.button("📑 Eşleştir ve CSV oluştur", use_container_width=True)
+    with ctop2:
+        st.caption("Butona bastıktan sonra aşağıda geniş bir önizleme tablosu ve indirme butonu görünür.")
 
-    if st.button("📑 Eşleştir ve CSV oluştur"):
+    if go_btn:
         if not zip_up:
             st.warning("Önce ZIP yükleyin.")
             st.stop()
@@ -786,7 +790,7 @@ with tab_c:
             st.warning("Önce Rehber dosyası yükleyin.")
             st.stop()
 
-        # ZIP içindeki PDF dosyalarını tara
+        # ZIP → PDF listesi
         try:
             zf = zipfile.ZipFile(zip_up)
             pdf_rows = []
@@ -795,8 +799,10 @@ with tab_c:
                     continue
                 if not info.filename.lower().endswith(".pdf"):
                     continue
-                did = _extract_daire_from_filename(info.filename)
-                pdf_rows.append({"Dosya": info.filename.rsplit("/",1)[-1], "DaireID": did})
+                pdf_rows.append({
+                    "file_name": info.filename.rsplit("/",1)[-1],
+                    "DaireID": _extract_daire_from_filename(info.filename)
+                })
             pdf_df = pd.DataFrame(pdf_rows)
         except Exception as e:
             st.error(f"ZIP okunamadı: {e}")
@@ -806,7 +812,7 @@ with tab_c:
             st.error("ZIP’te PDF bulunamadı.")
             st.stop()
 
-        # Rehberi oku ve normalize et
+        # Rehber oku
         try:
             if rehber_up.name.lower().endswith(".csv"):
                 raw = pd.read_csv(rehber_up)
@@ -816,6 +822,7 @@ with tab_c:
             st.error(f"Rehber okunamadı: {e}")
             st.stop()
 
+        # Kolon haritalama
         cols_map = {c: _norm_colname(c) for c in raw.columns}
         c_blok = _pick_col(cols_map, "blok")
         c_dno  = _pick_col(cols_map, "daire no","daire","daireno","daire  no")
@@ -824,9 +831,10 @@ with tab_c:
 
         if not c_blok or not c_dno or not c_tel:
             st.error("Rehberde en az 'Blok', 'Daire No', 'Telefon' bulunmalıdır.")
-            st.dataframe(raw.head(10))
+            st.dataframe(raw.head(20), use_container_width=True, height=480)
             st.stop()
 
+        # Rehber normalize
         reh = pd.DataFrame({
             "Blok": raw[c_blok].astype(str).str.upper().str.strip(),
             "Daire No": raw[c_dno].apply(_pad3_for_merge),
@@ -835,55 +843,56 @@ with tab_c:
         })
         reh["DaireID"] = reh["Blok"].str.upper().str.strip() + "-" + reh["Daire No"]
 
-        # Telefonu WhatsApp formatına yaklaştır (hafif temizlik; ayrıntılı temizliği önceki sekmeden yapmıştık)
+        # Telefon pratik normalizasyon
         def _quick_norm_phone(x: str) -> str:
             s = re.sub(r"[^\d+]", "", x)
             if s.startswith("+"):
                 return s
-            if re.fullmatch(r"05\d{9}", s):
+            if re.fullmatch(r"05\d{9}", s):  # 05XXXXXXXXX
                 return "+90" + s[1:]
-            if re.fullmatch(r"5\d{9}", s):
+            if re.fullmatch(r"5\d{9}", s):   # 5XXXXXXXXX
                 return "+90" + s
-            if re.fullmatch(r"0\d{10,11}", s):
+            if re.fullmatch(r"0\d{10,11}", s):  # 0XXXXXXXXXXX
                 return "+90" + s[1:]
             return s
         reh["Telefon"] = reh["Telefon"].apply(_quick_norm_phone)
 
         # Eşleştirme
         merged = pdf_df.merge(reh[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
-        merged["Dosya_Link"] = merged["Dosya"].apply(lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url.strip() else "")
+        merged["file_url"] = merged["file_name"].apply(lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url.strip() else "")
 
-        # Uyarılar / Durum
-        missing_did = merged[merged["DaireID"].isna()].shape[0]
-        missing_tel = merged[merged["Telefon"].isna() | (merged["Telefon"]=="")].shape[0]
-        if missing_did > 0:
-            st.warning(f"⚠️ Dosya adından DaireID çıkarılamayan {missing_did} kayıt var. (Dosya adlarını kontrol edin.)")
-        if missing_tel > 0:
-            st.warning(f"⚠️ Eşleşen fakat telefonu eksik {missing_tel} kayıt var. (Rehberi güncelleyin.)")
+        # Durum çubuğu
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            st.metric("Toplam kayıt", len(merged))
+        with a2:
+            st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+        with a3:
+            st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
 
-        st.success(f"Eşleştirme tamam: {len(merged)} kayıt.")
-        st.dataframe(merged.head(50))
+        st.markdown("**Eşleştirme Önizleme**")
+        st.dataframe(merged.rename(columns={
+            "Telefon":"phone", "Ad Soyad / Unvan":"name"
+        }), use_container_width=True, height=700)
 
-        # WhatsApp’a uygun minimal CSV (ör: phone, name, daire_id, file_url)
+        # Çıkış CSV (WhatsApp’a uygun minimal alanlar)
         out_csv = merged.rename(columns={
             "Telefon": "phone",
             "Ad Soyad / Unvan": "name",
             "DaireID": "daire_id",
-            "Dosya": "file_name",
-            "Dosya_Link": "file_url",
+            "file_name": "file_name",
+            "file_url": "file_url",
         })[["phone","name","daire_id","file_name","file_url"]]
-
-        # İndirilebilir içerik hazırlığı
         b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv, file_name="WhatsApp_Recipients.csv", mime="text/csv")
+        st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv,
+                           file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
 
-        # Basit bir mesaj şablonu örneği (URL butonlu template için parametreler)
-        st.markdown("**Örnek mesaj gövdesi (manuel gönderim veya otomasyon sistemi için):**")
-        st.code(
-            "Merhaba {name},\n"
-            "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
-            "Dosyayı butondan görüntüleyebilirsiniz.\n",
-            language="text"
-        )
-        st.info("• WhatsApp Şablonunda **URL butonu** kullanacaksan: otomasyonunda `file_url` sütununu butona bağla.\n"
-                "• Google Drive kullanıyorsan, dosyaları Drive’a yükledikten sonra her dosyanın paylaşım linkini `file_url` sütununa ekle (veya base URL + dosya adı mantığını kullan).")
+        with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
+            st.code(
+                "Merhaba {name},\n"
+                "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
+                "Dosyayı butondan görüntüleyebilirsiniz.\n",
+                language="text"
+            )
+            st.info("WhatsApp şablonunda **URL butonu** kullan: CSV’deki `file_url` alanını butona bağla. "
+                    "Drive kullanıyorsan, paylaşımları 'linki olan herkes görüntüleyebilir' yapmayı unutma.")
