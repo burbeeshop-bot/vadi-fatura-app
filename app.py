@@ -1238,7 +1238,7 @@ with wa_tab2:
                     language="text"
                 )
 # ---------------- TAB W: WhatsApp Gönder (Cloud API) ----------------
-    with tab_w:
+with tab_w:
     st.markdown("### 📲 WhatsApp Gönder (Meta Cloud API)")
 
     st.info("İlk mesajı **şablon** ile başlatmalısın. Sonrasında 24 saat içinde serbest metin / belge gönderebilirsin.")
