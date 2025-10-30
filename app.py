@@ -1,12 +1,13 @@
 # app.py
-# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Dropbox UUID Upload entegre) ===
+# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Google Drive ile Tekil Linkler) ===
+# Gereken paketler:
+#   pip install streamlit pandas openpyxl pypdf reportlab python-docx
 
-import io, os, re, zipfile, unicodedata, uuid, json, base64
+import io, os, re, zipfile, unicodedata, json
 from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
-import requests
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -22,6 +23,12 @@ try:
     HAS_DOCX = True
 except Exception:
     HAS_DOCX = False
+
+# -----------------------------------------------------------------------------
+# Sabitler (Drive klasörün)
+# -----------------------------------------------------------------------------
+# Bu klasörü kullanacağız: https://drive.google.com/drive/folders/1P8CZXb0G0RcNIe89CIyDASCborzmgSYF
+DRIVE_FOLDER_ID_DEFAULT = "1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
 
 # -----------------------------------------------------------------------------
 # Streamlit Page
@@ -50,7 +57,7 @@ def _to_float_tr(s: str) -> float:
     s = str(s).strip().replace(".", "").replace(",", ".")
     try:
         return float(s)
-    except:
+    except Exception:
         return 0.0
 
 def _normalize_tr(t: str) -> str:
@@ -380,7 +387,7 @@ def _norm_cols(s: str) -> str:
 def _pad3_aps(x) -> str:
     try:
         n = int(str(x).strip());  return f"{n:03d}"
-    except:
+    except Exception:
         s = str(x).strip()
         nums = "".join([ch for ch in s if ch.isdigit()])
         return f"{int(nums):03d}" if nums else s
@@ -473,7 +480,7 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     return bio.getvalue()
 
 # -----------------------------------------------------------------------------
-# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
+# Rehber Okuyucu (WhatsApp için)
 # -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
@@ -481,9 +488,6 @@ def _norm_rehber(s: str) -> str:
             .replace(".","").replace("_"," ").replace("-"," "))
 
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
-    """
-    'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
-    """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
@@ -496,10 +500,6 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Op
     return None
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apsiyon’dan gelen başlıkları standart isimlere çevirir:
-    Hedef: Blok, Daire No, Ad Soyad / Unvan (ops), Tel.Tip (ops), Telefon
-    """
     mapping = {}
     for c in df.columns:
         nc = _norm_rehber(c)
@@ -516,13 +516,8 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Apsiyon çıktısını otomatik başlık satırı tespitiyle okur ve standart kolonlara map eder.
-    Dönen kolonlar en az: Blok, Daire No, Telefon (+ opsiyonel: Ad Soyad / Unvan)
-    """
     from io import BytesIO
 
-    # 1) Ham oku (header=None) ve başlığı bul
     if filename.lower().endswith(".csv"):
         raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
     else:
@@ -530,16 +525,13 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
 
     hdr = _find_header_row_contacts(raw, search_rows=50)
     if hdr is None:
-        st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
         hdr = 0
 
-    # 2) Başlıkla tekrar oku
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(BytesIO(file_bytes), header=hdr, dtype=str)
     else:
         df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
 
-    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
     if hdr > 0:
         upper = raw.iloc[hdr-1]
         new_cols = []
@@ -554,13 +546,9 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
             new_cols.append(name)
         df.columns = new_cols
 
-    # 4) Tamamen boş kolonları at
     df = df.dropna(axis=1, how="all")
-
-    # 5) Kolon adlarını standart isimlere map et
     df = _map_contact_columns(df)
 
-    # 6) Zorunlu kolon kontrolü
     missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
     if missing:
         cols_map_debug = {c: _norm_colname(c) for c in df.columns}
@@ -569,7 +557,6 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         st.dataframe(df.head(20), use_container_width=True)
         raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
-    # 7) Temizlik ve DaireID üret
     def _pad3_for_merge(x) -> str:
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
@@ -595,143 +582,38 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Dropbox Helpers (HTTP ile) — upload + paylaşım linki
+# Google Drive Link Helpers (ID → görünür link)
 # -----------------------------------------------------------------------------
-def _dbx_headers(token: str, extra: dict | None = None) -> dict:
-    h = {"Authorization": f"Bearer {token}"}
-    if extra:
-        h.update(extra)
-    return h
+def drive_direct_link(file_id: str, mode: str = "view") -> str:
+    """mode: 'view' (tarayıcı önizleme) veya 'download' (indir)."""
+    if mode == "download":
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return f"https://drive.google.com/uc?export=view&id={file_id}"
 
-def dropbox_upload_bytes(token: str, path: str, data: bytes) -> dict:
-    """
-    /2/files/upload — App’inin erişebildiği alana 'path' ile yükler.
-    path ör: '/AtlasVadi_Faturalar/hello.txt'
-    """
-    url = "https://content.dropboxapi.com/2/files/upload"
-    args = {
-        "path": path,
-        "mode": "add",
-        "autorename": True,
-        "mute": False,
-        "strict_conflict": False
-    }
-    headers = _dbx_headers(token, {
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": json.dumps(args)
-    })
-    resp = requests.post(url, headers=headers, data=data, timeout=60)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Dropbox upload hata: {resp.status_code} — {resp.text}")
-    return resp.json()
-
-def dropbox_create_shared_link(token: str, path: str) -> str:
-    """
-    /2/sharing/create_shared_link_with_settings — kalıcı, tahmin edilemez link.
-    scopes: sharing.write gerekli.
-    """
-    url = "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings"
-    headers = _dbx_headers(token, {"Content-Type": "application/json"})
-    payload = {
-        "path": path,
-        "settings": {
-            "requested_visibility": "public",
-            "audience": "public",
-            "access": "viewer"
-        }
-    }
-    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    if resp.status_code == 409:
-        # Link zaten varsa, fetch edelim:
-        url2 = "https://api.dropboxapi.com/2/sharing/list_shared_links"
-        payload2 = {"path": path, "direct_only": True}
-        resp2 = requests.post(url2, headers=headers, data=json.dumps(payload2), timeout=60)
-        if resp2.status_code != 200:
-            raise RuntimeError(f"Dropbox shared link liste hata: {resp2.status_code} — {resp2.text}")
-        items = resp2.json().get("links", [])
-        if not items:
-            raise RuntimeError("Dropbox: shared link yok / oluşturulamadı.")
-        return items[0]["url"]
-    if resp.status_code != 200:
-        raise RuntimeError(f"Dropbox shared link hata: {resp.status_code} — {resp.text}")
-    return resp.json()["url"]
-
-def dropbox_get_temporary_link(token: str, path: str) -> str:
-    """
-    /2/files/get_temporary_link — 4 saatlik tekil link (enumerable değil).
-    scopes: files.content.read yeterli.
-    """
-    url = "https://api.dropboxapi.com/2/files/get_temporary_link"
-    headers = _dbx_headers(token, {"Content-Type": "application/json"})
-    payload = {"path": path}
-    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Dropbox temp link hata: {resp.status_code} — {resp.text}")
-    return resp.json()["link"]
-
-def dropbox_upload_uuid_and_share(file_bytes: bytes, original_name: str, parent_folder: str) -> Tuple[str, str]:
-    """
-    Bytes'ı parent_folder altına UUID adla yükler, paylaşım linkini döner.
-    return: (dropbox_path, shared_url)
-    """
-    token = st.secrets.get("dropbox", {}).get("access_token", "")
-    if not token:
-        raise RuntimeError("Dropbox access token yok. secrets.toml -> [dropbox].access_token")
-
-    if not parent_folder.startswith("/"):
-        parent_folder = "/" + parent_folder
-    parent_folder = parent_folder.rstrip("/")
-
-    ext = os.path.splitext(original_name)[1] or ".pdf"
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    path = f"{parent_folder}/{safe_name}"
-    meta = dropbox_upload_bytes(token, path, file_bytes)
+def parse_daire_from_filename(fn: str) -> Optional[str]:
+    """'A1-013.pdf' / 'B2_7.pdf' / 'C3 105.pdf' gibi adlardan DaireID çıkarır → 'A1-013'."""
+    name = fn.rsplit("/",1)[-1].rsplit("\\",1)[-1]
+    m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", name)
+         or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", name)
+         or re.search(r"([A-Za-z]\d).*?(\d{3})", name))
+    if not m:
+        return None
+    blok = m.group(1).upper()
     try:
-        url = dropbox_create_shared_link(token, meta["path_lower"])
+        dno = f"{int(m.group(2)):03d}"
     except Exception:
-        # fallback: geçici link (4 saat)
-        url = dropbox_get_temporary_link(token, meta["path_lower"])
-    return meta.get("path_display", path), url
-
-# -----------------------------------------------------------------------------
-# Basit Dropbox test paneli (opsiyonel) — SADECE Tab C içinde expander olarak çağrılacak
-# -----------------------------------------------------------------------------
-def dropbox_upload_test_panel(default_folder="/AtlasVadi_Faturalar"):
-    st.subheader("Dropbox testleri")
-    token_present = bool(st.secrets.get("dropbox", {}).get("access_token"))
-    if st.button("🔎 Kimlik testi"):
-        if not token_present:
-            st.error("Secrets içinde [dropbox].access_token yok.")
-        else:
-            r = requests.post(
-                "https://api.dropboxapi.com/2/users/get_current_account",
-                headers={"Authorization": f"Bearer {st.secrets['dropbox']['access_token']}",
-                         "Content-Type": "application/json"}
-            )
-            st.write("get_current_account:", r.status_code)
-            st.json(r.json() if r.ok else {"error": r.text})
-
-    folder = st.text_input("Klasör yolu", default_folder)
-    if st.button("📄 hello.txt yükle"):
-        if not token_present:
-            st.error("Secrets içinde [dropbox].access_token yok.")
-        else:
-            try:
-                path = f"{folder.rstrip('/')}/hello.txt"
-                meta = dropbox_upload_bytes(st.secrets["dropbox"]["access_token"], path, b"hello from streamlit")
-                st.success(f"Yüklendi: {meta.get('path_display')}")
-            except Exception as e:
-                st.error(str(e))
+        dno = str(m.group(2)).zfill(3)
+    return f"{blok}-{dno}"
 
 # -----------------------------------------------------------------------------
 # UI — 3 Sekme
 # -----------------------------------------------------------------------------
-st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
+st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp")
 
 tab_a, tab_b, tab_c = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
-    "📤 WhatsApp Gönderim Hazırlığı"
+    "📤 WhatsApp (Drive Linkli)"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
@@ -924,79 +806,91 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
+# ---------------- TAB C: WhatsApp Gönderim Hazırlığı (Google Drive) ----------------
 with tab_c:
     st.markdown("""
     <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
       <img src='https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg' width='28'>
-      <h3 style='margin:0;'>WhatsApp Gönderim Hazırlığı</h3>
+      <h3 style='margin:0;'>WhatsApp Gönderim Hazırlığı — Google Drive</h3>
     </div>
     """, unsafe_allow_html=True)
 
-    up1, up2 = st.columns([1,1], vertical_alignment="top")
-    with up1:
-        st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
-        zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip", label_visibility="collapsed")
-    with up2:
-        st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (Apsiyon ham Excel/CSV).")
-        rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber", label_visibility="collapsed")
+    st.info(
+        "PDF’leri **Google Drive klasörüne** koyuyorsun ("
+        f"[klasör linki](https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID_DEFAULT})"
+        "). Klasördeki PDF adları `A1-013.pdf` formatında olmalı. "
+        "Aşağıdaki **drive_file_list.csv** dosyasını yükleyerek her PDF için **tekil link** oluşturacağız."
+    )
 
-    with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
-        base_url = st.text_input("Base URL (örn: https://cdn.site.com/faturalar/ )", value="", key="wa_base")
+    with st.expander("🔧 drive_file_list.csv nasıl oluşturulur? (Apps Script 1 dak.)", expanded=False):
+        st.code(
+            f"""// Drive'da 'Yeni > Diğer > Apps Script' deyip çalıştırın.
+function exportDriveFileListToCSV() {{
+  var FOLDER_ID = '{DRIVE_FOLDER_ID_DEFAULT}';
+  var folder = DriveApp.getFolderById(FOLDER_ID);
+  var files = folder.getFiles();
+  var rows = [['file_name','file_id']];
+  while (files.hasNext()) {{
+    var f = files.next();
+    if ((f.getMimeType()+'').indexOf('pdf') !== -1) {{
+      rows.push([f.getName(), f.getId()]);
+    }}
+  }}
+  var csv = rows.map(r => r.map(v => `"${{(v+'').replace(/"/g,'""')}}"`).join(',')).join('\\n');
+  var out = folder.createFile('drive_file_list.csv', csv, MimeType.PLAIN_TEXT);
+  Logger.log('CSV oluşturuldu: ' + out.getUrl());
+}}
+""",
+            language="javascript"
+        )
 
-    ctop1, ctop2 = st.columns([1,3], vertical_alignment="center")
-    with ctop1:
-        go_btn = st.button("📑 Eşleştir ve CSV oluştur", use_container_width=True, key="wa_go")
-    with ctop2:
-        st.caption("Butona bastıktan sonra aşağıda geniş bir önizleme tablosu ve indirme butonu görünür.")
+    st.subheader("Girdi dosyaları")
+    c_up1, c_up2 = st.columns([1,1], vertical_alignment="top")
+    with c_up1:
+        drive_csv = st.file_uploader("1) drive_file_list.csv (file_name,file_id)", type=["csv"], key="wa_drive_csv")
+    with c_up2:
+        rehber_up = st.file_uploader("2) Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber")
+
+    link_mode_label = st.radio("Link tipi", ["Tarayıcıda görüntüle (önerilen)", "Direkt indir"], index=0, key="wa_linkmode")
+    go_btn = st.button("📑 Eşleştir ve WhatsApp CSV oluştur", use_container_width=True, key="wa_go_drive")
 
     if go_btn:
-        if not zip_up:
-            st.warning("Önce ZIP yükleyin."); st.stop()
+        if not drive_csv:
+            st.warning("Önce drive_file_list.csv yükleyin."); st.stop()
         if not rehber_up:
-            st.warning("Önce Rehber dosyası yükleyin."); st.stop()
+            st.warning("Önce Rehber dosyasını yükleyin."); st.stop()
 
-        # ZIP → PDF listesi + DaireID çıkar
-        try:
-            zf = zipfile.ZipFile(zip_up)
-            pdf_rows = []
-            for info in zf.infolist():
-                if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
-                    continue
-                base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
-                m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
-                     or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
-                     or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
-                daire_id = None
-                if m:
-                    try:
-                        daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
-                    except:
-                        daire_id = f"{m.group(1).upper()}-{m.group(2)}"
-                pdf_rows.append({"file_name": base, "DaireID": daire_id})
-            pdf_df = pd.DataFrame(pdf_rows)
-        except Exception as e:
-            st.error(f"ZIP okunamadı: {e}"); st.stop()
+        # Drive CSV → DaireID çıkar
+        df_drive = pd.read_csv(drive_csv, dtype=str)
+        need_cols = {"file_name","file_id"}
+        if not need_cols.issubset(df_drive.columns):
+            st.error("drive_file_list.csv içinde 'file_name' ve 'file_id' sütunları olmalı.")
+            st.stop()
 
-        if pdf_df.empty:
-            st.error("ZIP’te PDF bulunamadı."); st.stop()
+        df_drive = df_drive.dropna(subset=["file_name","file_id"]).copy()
+        df_drive["DaireID"] = df_drive["file_name"].apply(parse_daire_from_filename)
 
-        # Rehber oku (sağlam yol)
+        if df_drive["DaireID"].isna().any():
+            st.warning(f"⚠️ DaireID çıkarılamayan dosya sayısı: {int(df_drive['DaireID'].isna().sum())} — "
+                       "PDF adlarını `A1-013.pdf` gibi düzenleyin.")
+
+        # Rehber
         try:
             rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
         except Exception as e:
-            st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
+            st.error(f"Rehber okunamadı / eşlenemedi: {e}")
+            st.stop()
 
-        # Eşleştirme
-        merged = pdf_df.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
-        merged["file_url"] = merged["file_name"].apply(
-            lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
-        )
+        # Merge
+        merged = df_drive.merge(rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
+
+        link_mode = "view" if link_mode_label.startswith("Tarayıcı") else "download"
+        merged["file_url"] = merged["file_id"].apply(lambda fid: drive_direct_link(fid, link_mode) if pd.notna(fid) else "")
 
         a1, a2, a3 = st.columns(3)
         with a1: st.metric("Toplam kayıt", len(merged))
-        with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-        with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+        with a2: st.metric("DaireID bulunamadı (Drive dosya adı)", int(merged["DaireID"].isna().sum()))
+        with a3: st.metric("Telefon eksik (Rehber)", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
 
         st.markdown("**Eşleştirme Önizleme**")
         st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
@@ -1010,82 +904,13 @@ with tab_c:
             "file_url": "file_url",
         })[["phone","name","daire_id","file_name","file_url"]]
         b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv,
-                           file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True, key="dl_csv")
+        st.download_button("📥 WhatsApp_Recipients.csv", b_csv,
+                           file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
 
         with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
             st.code(
                 "Merhaba {name},\n"
                 "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
-                "Dosyayı butondan görüntüleyebilirsiniz.\n",
+                "Dosyayı aşağıdaki butondan görüntüleyebilirsiniz.\n",
                 language="text"
             )
-
-        # ------ Dropbox’a yükle ve UUID link ver ------
-        st.markdown("### 🔐 Dropbox’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
-        with st.expander("Dropbox yükleme (dosya bazında paylaşımlı link)", expanded=False):
-            dcol1, dcol2 = st.columns([2,1])
-            dropbox_folder = dcol1.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar", help="Örn: /AtlasVadi_Faturalar")
-            upload_btn = dcol2.button("☁️ Yükle", use_container_width=True)
-
-            token_present = bool(st.secrets.get("dropbox", {}).get("access_token"))
-            st.caption("Dropbox token: " + ("✅ var" if token_present else "❌ yok (secrets’a ekleyin)"))
-
-            if upload_btn:
-                if not token_present:
-                    st.error("Dropbox access token bulunamadı. Secrets’a ekleyin: [dropbox].access_token")
-                    st.stop()
-
-                try:
-                    zf = zipfile.ZipFile(zip_up)
-                except Exception as e:
-                    st.error(f"ZIP açılamadı: {e}"); st.stop()
-
-                pdf_infos = [i for i in zf.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".pdf")]
-                if not pdf_infos:
-                    st.error("ZIP içinde PDF yok."); st.stop()
-
-                uploaded_map = {}
-                progress = st.progress(0)
-                total = len(pdf_infos)
-                done = 0
-
-                for info in pdf_infos:
-                    base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
-                    data = zf.read(info)
-                    try:
-                        _, link = dropbox_upload_uuid_and_share(data, base, dropbox_folder)
-                        uploaded_map[base] = link
-                    except Exception as e:
-                        st.warning(f"Yükleme hatası ({base}): {e}")
-                    done += 1
-                    progress.progress(done/total)
-
-                st.success(f"Yükleme tamam: {done}/{total}")
-
-                # merged'e linkleri yaz
-                if "file_url" not in merged.columns:
-                    merged["file_url"] = ""
-                merged["file_url"] = merged.apply(lambda r: uploaded_map.get(r["file_name"], r.get("file_url","")), axis=1)
-
-                st.dataframe(merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
-                             use_container_width=True, height=600)
-
-                out_csv2 = merged.rename(columns={
-                    "Telefon": "phone",
-                    "Ad Soyad / Unvan": "name",
-                    "DaireID": "daire_id",
-                    "file_name": "file_name",
-                    "file_url": "file_url",
-                })[["phone","name","daire_id","file_name","file_url"]]
-                b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("📥 WhatsApp_Recipients.csv (Dropbox UUID linkli)", b_csv2,
-                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
-
-                st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
-                                   file_name="uploaded_map.json")
-                st.info("Her dosya benzersiz UUID adla yüklendi ve dosya bazında link üretildi.")
-
-    # --- Sadece bu sekmede görünen test paneli ---
-    with st.expander("🔎 Dropbox testleri (isteğe bağlı)", expanded=False):
-        dropbox_upload_test_panel()
