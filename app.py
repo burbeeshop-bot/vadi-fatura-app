@@ -1237,3 +1237,8 @@ with wa_tab2:
                     "Dosyayı butondan görüntüleyebilirsiniz.\n",
                     language="text"
                 )
+# ---------------- TAB D: WhatsApp Gönder (Cloud API) ----------------
+tab_d = st.tabs(["📲 WhatsApp Gönder (Cloud API)"])[0]
+with tab_d:
+    st.markdown("### 📲 WhatsApp Gönder (Meta Cloud API)")
+    # (buraya az önce sana verdiğim uzun kod bloğunu yapıştır)
