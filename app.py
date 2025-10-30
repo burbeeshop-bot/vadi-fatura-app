@@ -5,7 +5,76 @@ from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
+# ---------------- GOOGLE DRIVE: Secrets ile bağlan & yardımcılar ----------------
+try:
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    _GDRIVE_OK = True
+except Exception:
+    _GDRIVE_OK = False
 
+import streamlit as st
+import json
+
+@st.cache_resource(show_spinner=False)
+def get_drive_service_from_secrets():
+    """
+    Streamlit Secrets'taki [gdrive_service_account] ile Drive service oluşturur.
+    """
+    info = st.secrets.get("gdrive_service_account")
+    if not info:
+        raise RuntimeError("Streamlit Secrets içinde [gdrive_service_account] yok.")
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    return service
+
+def list_pdfs_in_folder(service, folder_id: str):
+    """
+    Verilen klasördeki PDF dosyalarını listeler.
+    """
+    files = []
+    page_token = None
+    query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
+    while True:
+        resp = service.files().list(
+            q=query,
+            fields="nextPageToken, files(id,name,webViewLink,webContentLink)",
+            pageSize=1000,
+            pageToken=page_token,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        files.extend(resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return files
+
+def ensure_anyone_with_link_permission(service, file_id: str):
+    """
+    Dosyayı 'linke sahip olan görüntüleyebilir' yapar (sadece dosya bazında).
+    """
+    try:
+        service.permissions().create(
+            fileId=file_id,
+            body={"role": "reader", "type": "anyone"},
+            fields="id",
+            supportsAllDrives=True
+        ).execute()
+    except HttpError:
+        pass
+
+def build_direct_file_link(file_id: str, mode: str = "download") -> str:
+    """
+    'download' -> doğrudan indirme linki
+    'view'     -> Drive görüntüleme linki
+    """
+    if mode == "view":
+        return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
+    else:
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
 # PDF
 from pypdf import PdfReader, PdfWriter
 
