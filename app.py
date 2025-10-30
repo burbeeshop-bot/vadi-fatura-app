@@ -1237,25 +1237,3 @@ with wa_tab2:
                     "Dosyayı butondan görüntüleyebilirsiniz.\n",
                     language="text"
                 )
-import io
-from googleapiclient.http import MediaIoBaseUpload
-st.subheader("📤 Drive’a Test Yükleme")
-
-if st.button("Hello.txt test yükle"):
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        info = st.secrets["gdrive_service_account"]
-        scopes = ["https://www.googleapis.com/auth/drive"]
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-        # Test dosyası oluştur
-        file_metadata = {"name": "hello.txt", "parents": ["1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"]}
-        media = MediaIoBaseUpload(io.BytesIO(b"Merhaba Atlas Vadi!"), mimetype="text/plain")
-        uploaded = service.files().create(body=file_metadata, media_body=media, fields="id, name, webViewLink").execute()
-
-        st.success(f"✅ Yüklendi: [{uploaded['name']}]({uploaded['webViewLink']})")
-    except Exception as e:
-        st.error(f"❌ Yükleme hatası: {e}")
