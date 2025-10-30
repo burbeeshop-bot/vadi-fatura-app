@@ -540,7 +540,7 @@ def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xl
     return bio.getvalue()
 
 # -----------------------------------------------------------------------------
-# Rehber Okuyucu (WhatsApp için) — Gelişmiş başlık yakalama
+# Rehber Okuyucu (WhatsApp için) — Esnek: Apsiyon veya Basit CSV şeması
 # -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
@@ -550,47 +550,171 @@ def _norm_rehber(s: str) -> str:
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
     """
     'Blok' + ('Daire'/'Daire No') + ('Telefon'/'Tel'/'GSM'/'Cep') birlikte görünen satırı başlık kabul eder.
+    Ama basit CSV şemasını (phone/name/daire_id) da destekleyeceğiz; o durumda 0 döner.
     """
     limit = min(search_rows, len(df_raw))
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
         row_text = " | ".join(cells)
-        has_blok  = "blok" in row_text
-        has_daire = ("daire no" in row_text) or ("daire  no" in row_text) or ("daire" in row_text) or ("daireno" in row_text)
-        has_tel   = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) or ("telefon no" in row_text)
+        has_blok  = "blok" in row_text or "block" in row_text
+        has_daire = ("daire no" in row_text) or ("daire  no" in row_text) or ("daire" in row_text) \
+                    or ("daireno" in row_text) or ("apartment" in row_text) or ("flat" in row_text)
+        has_tel   = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) \
+                    or ("telefon no" in row_text) or ("phone" in row_text) or ("mobile" in row_text)
         if has_blok and has_daire and has_tel:
             return i
-    return None
+    # Esnek davran: bulamazsa 0 kabul et (çoğu CSV zaten ilk satır başlık)
+    return 0
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Hem Apsiyon başlıklarını hem de basit CSV başlıklarını destekler.
+    Hedef final kolonlar: Blok, Daire No, Ad Soyad / Unvan (ops), Telefon
+    Ayrıca daire_id varsa parçalar.
+    """
+    # Orijinal kolon adları
+    original_cols = list(df.columns)
+
+    # Önce normalize edilmiş bir isim haritası oluştur
+    norm_map = {_norm_rehber(c): c for c in original_cols}
+
+    # Basit CSV şeması mı? (phone + daire_id)
+    has_phone    = any(k in norm_map for k in ["phone","mobile","telefon","tel","gsm","cep","telefon no"])
+    has_daire_id = any(k in norm_map for k in ["daire id","daireid","daireid ","daire_id"])
+    if has_phone and has_daire_id:
+        c_phone    = norm_map.get("phone") or norm_map.get("mobile") or norm_map.get("telefon") \
+                     or norm_map.get("tel") or norm_map.get("gsm") or norm_map.get("cep") or norm_map.get("telefon no")
+        c_daire_id = norm_map.get("daire id") or norm_map.get("daireid") or norm_map.get("daireid ") or norm_map.get("daire_id")
+        c_name     = norm_map.get("name") or norm_map.get("ad soyad") or norm_map.get("ad soyad  unvan") \
+                     or norm_map.get("ad soyad/unvan") or norm_map.get("unvan")
+
+        # Yeni DataFrame’i oluştur
+        tmp = pd.DataFrame()
+        tmp["Telefon"] = df[c_phone].astype(str)
+        tmp["Ad Soyad / Unvan"] = df[c_name].astype(str) if c_name else None
+        tmp["DaireID"] = df[c_daire_id].astype(str)
+
+        # DaireID → Blok ve Daire No çıkar
+        def _split_did(val: str) -> Tuple[str,str]:
+            s = str(val).strip()
+            m = (re.search(r"([A-Za-z]\d)\s*[-_ ]\s*(\d{1,3})", s)
+                 or re.search(r"([A-Za-z]\d).*?(\d{3})", s)
+                 or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", s))
+            if not m:
+                return "", ""
+            blok = m.group(1).upper()
+            try:
+                dno = f"{int(m.group(2)):03d}"
+            except:
+                dno = str(m.group(2)).zfill(3)
+            return blok, dno
+
+        tmp["Blok"], tmp["Daire No"] = zip(*tmp["DaireID"].map(_split_did))
+        # Telefonu normalize et
+        def _quick_norm_phone(x: str) -> str:
+            s = re.sub(r"[^\d+]", "", str(x))
+            if s.startswith("+"):                return s
+            if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
+            if re.fullmatch(r"5\d{9}", s):       return "+90" + s
+            if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
+            if re.fullmatch(r"90\d{10}", s):     return "+" + s
+            return s
+        tmp["Telefon"] = tmp["Telefon"].apply(_quick_norm_phone)
+
+        # Eksik olanları kontrol edip final döndür
+        if "Ad Soyad / Unvan" not in tmp.columns:
+            tmp["Ad Soyad / Unvan"] = None
+        tmp["Blok"] = tmp["Blok"].astype(str).str.upper().str.strip()
+        tmp["Daire No"] = tmp["Daire No"].astype(str).str.replace(r"\D","", regex=True).str.zfill(3)
+        tmp["DaireID"] = tmp["Blok"] + "-" + tmp["Daire No"]
+        return tmp[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
+
+    # Apsiyon şeması (TR/EN çeşitleri) — esnek eşleme
     mapping = {}
-    for c in df.columns:
+    for c in original_cols:
         nc = _norm_rehber(c)
-        if nc in ("blok","blok adi","blok adı","blokadi","blok ad","blokad"):
+        if nc in ("blok","blok adi","blok adı","blokadi","blok ad","blokad","block"):
             mapping[c] = "Blok"
-        elif nc in ("daire no","daire  no","daireno","daire"):
+        elif nc in ("daire no","daire  no","daireno","daire","apartment","flat","apt no","apartment no","unit","unit no"):
             mapping[c] = "Daire No"
-        elif "ad soyad / unvan" in nc or "ad soyad/unvan" in nc or "ad soyad" in nc or "unvan" in nc:
+        elif ("ad soyad / unvan" in nc) or ("ad soyad/unvan" in nc) or ("ad soyad" in nc) or ("unvan" in nc) or (nc == "name") or ("full name" in nc):
             mapping[c] = "Ad Soyad / Unvan"
-        elif nc in ("tel tip","tel tipi","tel tip:","tel tipi:","tel tip ","tel tipi "):
-            mapping[c] = "Tel.Tip"
-        elif (nc in ("telefon","tel","cep","gsm","telefon no","tel no","telefon numarasi","telefon numarası")) or ("telefon no" in nc):
+        elif (nc in ("telefon","tel","cep","gsm","telefon no","tel no","telefon numarasi","telefon numarası","phone","mobile")) or ("telefon no" in nc):
             mapping[c] = "Telefon"
-    return df.rename(columns=mapping)
+        elif nc in ("daire id","daireid","daire id ","daire_id"):
+            mapping[c] = "DaireID"
+
+    df2 = df.rename(columns=mapping)
+
+    # Eğer DaireID var ve Blok/Daire No yoksa parçala
+    if "DaireID" in df2.columns and (("Blok" not in df2.columns) or ("Daire No" not in df2.columns)):
+        def _split_did2(val: str) -> Tuple[str,str]:
+            s = str(val).strip()
+            m = (re.search(r"([A-Za-z]\d)\s*[-_ ]\s*(\d{1,3})", s)
+                 or re.search(r"([A-Za-z]\d).*?(\d{3})", s)
+                 or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", s))
+            if not m:
+                return "", ""
+            blok = m.group(1).upper()
+            try:
+                dno = f"{int(m.group(2)):03d}"
+            except:
+                dno = str(m.group(2)).zfill(3)
+            return blok, dno
+        blk, dno = zip(*df2["DaireID"].map(_split_did2))
+        df2["Blok"] = df2.get("Blok", pd.Series(blk)).fillna(blk)
+        df2["Daire No"] = df2.get("Daire No", pd.Series(dno)).fillna(dno)
+
+    # Zorunlu kolonlar
+    for need in ["Blok","Daire No","Telefon"]:
+        if need not in df2.columns:
+            # Basit hata gösterimi için aynı uyarı metnini kullanalım
+            cols_map_debug = {c: _norm_rehber(c) for c in df.columns}
+            st.error(f"Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
+            st.write("Algılanan kolonlar (normalize):", cols_map_debug)
+            raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
+
+    # Temizlik
+    def _pad3_for_merge(x) -> str:
+        digits = "".join(ch for ch in str(x or "") if str(x))
+        digits = "".join(ch for ch in str(x or "") if ch.isdigit())
+        return digits.zfill(3) if digits else ""
+
+    def _quick_norm_phone(x: str) -> str:
+        s = re.sub(r"[^\d+]", "", str(x))
+        if s.startswith("+"):                return s
+        if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
+        if re.fullmatch(r"5\d{9}", s):       return "+90" + s
+        if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
+        if re.fullmatch(r"90\d{10}", s):     return "+" + s
+        return s
+
+    if "Ad Soyad / Unvan" not in df2.columns:
+        df2["Ad Soyad / Unvan"] = None
+
+    df2["Blok"] = df2["Blok"].astype(str).str.upper().str.strip()
+    df2["Daire No"] = df2["Daire No"].apply(_pad3_for_merge)
+    df2["Telefon"] = df2["Telefon"].apply(_quick_norm_phone)
+    df2["DaireID"] = df2["Blok"] + "-" + df2["Daire No"]
+
+    return df2[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
+
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    - Apsiyon ham Excel/CSV (Blok, Daire No, Telefon …)
+    - Basit CSV (phone, name, daire_id, [file_name])
+    Şemalarının her ikisini de kabul eder.
+    """
     from io import BytesIO
 
-    # 1) Ham oku (header=None) ve başlığı bul
+    # 1) Ham oku (header=None) ve mantıklı başlık satırı tespit et
     if filename.lower().endswith(".csv"):
         raw = pd.read_csv(BytesIO(file_bytes), header=None, dtype=str)
     else:
         raw = pd.read_excel(BytesIO(file_bytes), header=None, dtype=str, engine="openpyxl")
 
     hdr = _find_header_row_contacts(raw, search_rows=50)
-    if hdr is None:
-        st.warning("Rehberde beklenen başlık satırı bulunamadı; ilk satır başlık varsayıldı.")
-        hdr = 0
 
     # 2) Başlıkla tekrar oku
     if filename.lower().endswith(".csv"):
@@ -598,7 +722,7 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     else:
         df = pd.read_excel(BytesIO(file_bytes), header=hdr, dtype=str, engine="openpyxl")
 
-    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt
+    # 3) 'Unnamed' kolon isimlerini bir üst satırdan düzelt (Apsiyon ham dosyalarda sık görülür)
     if hdr > 0:
         upper = raw.iloc[hdr-1]
         new_cols = []
@@ -616,41 +740,8 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     # 4) Tamamen boş kolonları at
     df = df.dropna(axis=1, how="all")
 
-    # 5) Kolon adlarını standart isimlere map et
-    df = _map_contact_columns(df)
-
-    # 6) Zorunlu kolon kontrolü
-    missing = [c for c in ["Blok","Daire No","Telefon"] if c not in df.columns]
-    if missing:
-        cols_map_debug = {c: _norm_colname(c) for c in df.columns}
-        st.error(f"Rehberde zorunlu kolon(lar) eksik: {', '.join(missing)}")
-        st.write("Algılanan kolonlar (normalize):", cols_map_debug)
-        st.dataframe(df.head(20), use_container_width=True)
-        raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
-
-    # 7) Temizlik ve DaireID üret
-    def _pad3_for_merge(x) -> str:
-        digits = "".join(ch for ch in str(x or "") if ch.isdigit())
-        return digits.zfill(3) if digits else ""
-
-    def _quick_norm_phone(x: str) -> str:
-        s = re.sub(r"[^\d+]", "", str(x))
-        if s.startswith("+"):                return s
-        if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
-        if re.fullmatch(r"5\d{9}", s):       return "+90" + s
-        if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
-        if re.fullmatch(r"90\d{10}", s):     return "+" + s
-        return s
-
-    if "Ad Soyad / Unvan" not in df.columns:
-        df["Ad Soyad / Unvan"] = None
-
-    df["Blok"] = df["Blok"].astype(str).str.upper().str.strip()
-    df["Daire No"] = df["Daire No"].apply(_pad3_for_merge)
-    df["Telefon"] = df["Telefon"].apply(_quick_norm_phone)
-    df["DaireID"] = df["Blok"] + "-" + df["Daire No"]
-
-    out = df[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]].copy()
+    # 5) Esnek kolon eşlemesi ve temiz DataFrame
+    out = _map_contact_columns(df)
     return out
 
 # -----------------------------------------------------------------------------
