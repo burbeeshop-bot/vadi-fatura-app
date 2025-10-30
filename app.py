@@ -815,10 +815,11 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c = st.tabs([
+tab_a, tab_b, tab_c, tab_w = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
-    "📤 WhatsApp Gönderim Hazırlığı"
+    "📤 WhatsApp Gönderim Hazırlığı",
+    "📲 WhatsApp Gönder (Cloud API)"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
