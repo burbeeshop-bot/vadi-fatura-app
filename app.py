@@ -948,92 +948,132 @@ with tab_c:
                                file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True, key="dl_csv")
 
     # --- Yol 2: Google Drive klasöründen PDF listele + tekil link üret ---
-    with wa_tab2:
-        st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
-        if not _drive_available():
-            st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\npip install google-api-python-client google-auth google-auth-oauthlib")
-        else:
-            json_key_path = st.text_input("Servis hesabı JSON yolu", value="atlasvadi-drive-uploader.json", help="Bu dosyayı app.py ile aynı klasöre koymuştun.")
-            folder_id = st.text_input("Drive Folder ID", value=DEFAULT_DRIVE_FOLDER_ID, help="Verdiğin klasör: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF")
+with wa_tab2:
+    st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
+    if not _GDRIVE_OK:
+        st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\npip install google-api-python-client google-auth google-auth-oauthlib")
+    else:
+        # JSON dosya yolu GİTTİ. Secrets kullanıyoruz.
+        folder_id = st.text_input(
+            "Drive Folder ID",
+            value=DEFAULT_DRIVE_FOLDER_ID,
+            help="Klasör ID: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
+        )
 
-            rehber_up2 = st.file_uploader("Rehber (XLSX/CSV) — Apsiyon ham dosya", type=["xlsx","csv"], key="wa_rehber2")
+        # Rehber yükleme (Apsiyon ham dosyası)
+        rehber_up2 = st.file_uploader(
+            "Rehber (XLSX/CSV) — Apsiyon ham dosya",
+            type=["xlsx","csv"], key="wa_rehber2"
+        )
 
-            drive_go = st.button("🗂️ Drive’dan pdf’leri çek, eşleştir ve CSV üret", use_container_width=True)
+        link_mode = st.radio(
+            "Link tipi",
+            ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
+            horizontal=True
+        )
 
-            if drive_go:
-                if not os.path.exists(json_key_path):
-                    st.error(f"JSON anahtar dosyası bulunamadı: {json_key_path}")
-                    st.stop()
-                if not folder_id.strip():
-                    st.error("Folder ID boş olamaz.")
-                    st.stop()
-                if not rehber_up2:
-                    st.error("Rehber dosyası yükleyin.")
-                    st.stop()
+        drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret", use_container_width=True)
 
-                try:
-                    # Secrets üzerinden bağlan
-                    from google.oauth2 import service_account
-                    from googleapiclient.discovery import build
+        if drive_go:
+            if not folder_id.strip():
+                st.error("Folder ID boş olamaz."); st.stop()
+            if not rehber_up2:
+                st.error("Rehber dosyası yükleyin."); st.stop()
 
-                    info = st.secrets["gdrive_service_account"]
-                    scopes = ["https://www.googleapis.com/auth/drive"]
-                    creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-                    service = build("drive", "v3", credentials=creds, cache_discovery=False)
-                except Exception as e:
-                    st.error(f"Drive servisine bağlanılamadı: {e}")
-                    st.stop()
+            # 1) Drive servisine bağlan (Secrets)
+            try:
+                service = get_drive_service_from_secrets()
+            except Exception as e:
+                st.error(f"Drive servisine bağlanılamadı: {e}")
+                st.stop()
 
-                try:
-                    files = list_pdfs_in_folder(service, folder_id.strip())
-                except Exception as e:
-                    st.error(f"Klasör listelenemedi: {e}")
-                    st.stop()
+            # 2) Klasördeki PDF'leri çek
+            try:
+                gfiles = list_pdfs_in_folder(service, folder_id.strip())
+            except Exception as e:
+                st.error(f"Klasör listelenemedi: {e}")
+                st.stop()
 
-                if not files:
-                    st.warning("Klasörde PDF bulunamadı.")
-                    st.stop()
+            if not gfiles:
+                st.warning("Klasörde PDF bulunamadı."); st.stop()
 
-                # DaireID çıkar + tekil linkleri oluştur
-                rows = []
-                for f in files:
-                    name = f["name"]
-                    did = extract_daire_from_filename(name)
-                    # Her dosya için tekil 'anyone viewer' linki
+            # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
+            import re, pandas as pd
+            pdf_rows = []
+            for f in gfiles:
+                base = f.get("name","")
+                m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
+                daire_id = None
+                if m:
                     try:
-                        link = ensure_anyone_viewer_and_get_link(service, f["id"])
-                    except Exception as e:
-                        link = ""
-                        st.warning(f"Link verilemedi ({name}): {e}")
-                    rows.append({"file_name": name, "file_id": f["id"], "DaireID": did, "file_url": link})
+                        daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
+                    except:
+                        daire_id = f"{m.group(1).upper()}-{m.group(2)}"
+                pdf_rows.append({"file_name": base, "DaireID": daire_id, "file_id": f["id"]})
+            pdf_df = pd.DataFrame(pdf_rows)
 
-                drive_df = pd.DataFrame(rows)
+            # 4) Rehberi oku
+            try:
+                rehber_df = load_contacts_any(rehber_up2.read(), rehber_up2.name)
+            except Exception as e:
+                st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
 
-                # Rehber oku
+            # 5) Eşleştir
+            merged = pdf_df.merge(
+                rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
+                on="DaireID",
+                how="left"
+            )
+
+            # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
+            # (sadece dosya bazında; klasör listing açılmaz)
+            link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
+
+            st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
+            for i, row in merged.iterrows():
+                fid = row.get("file_id")
+                if not fid:
+                    continue
                 try:
-                    rehber_df2 = load_contacts_any(rehber_up2.read(), rehber_up2.name)
-                except Exception as e:
-                    st.error(f"Rehber okunamadı / eşlenemedi: {e}")
-                    st.stop()
+                    ensure_anyone_with_link_permission(service, fid)
+                except Exception:
+                    pass
+                merged.at[i, "file_url"] = build_direct_file_link(fid, link_kind)
 
-                merged2 = drive_df.merge(rehber_df2[["DaireID","Telefon","Ad Soyad / Unvan"]], on="DaireID", how="left")
+            # 7) Önizleme + CSV
+            a1, a2, a3 = st.columns(3)
+            with a1: st.metric("Toplam kayıt", len(merged))
+            with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+            with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
 
-                b1, b2, b3 = st.columns(3)
-                with b1: st.metric("PDF sayısı", len(merged2))
-                with b2: st.metric("DaireID eşleşmeyen", int(merged2["DaireID"].isna().sum()))
-                with b3: st.metric("Telefon eksik", int((merged2["Telefon"].isna() | (merged2["Telefon"]=="")).sum()))
+            st.markdown("**Eşleştirme Önizleme**")
+            st.dataframe(
+                merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                use_container_width=True, height=600
+            )
 
-                st.markdown("**Eşleştirme Önizleme (Drive)**")
-                st.dataframe(merged2.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
-                             use_container_width=True, height=600)
+            out_csv = merged.rename(columns={
+                "Telefon": "phone",
+                "Ad Soyad / Unvan": "name",
+                "DaireID": "daire_id",
+                "file_name": "file_name",
+                "file_url": "file_url",
+            })[["phone","name","daire_id","file_name","file_url"]]
+            b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "📥 WhatsApp_Recipients.csv (Drive linkli)",
+                b_csv,
+                file_name="WhatsApp_Recipients.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
-                out_csv2 = merged2.rename(columns={
-                    "Telefon": "phone",
-                    "Ad Soyad / Unvan": "name",
-                    "DaireID": "daire_id",
-                    "file_name": "file_name",
-                    "file_url": "file_url",
-                })[["phone","name","daire_id","file_name","file_url"]]
-                b_csv2 = out_csv2.to_csv(index=False).encode("utf-8-sig")
-                st.download_button("📥 WhatsApp_Recipients.csv (Google Drive linkli)", b_csv2,
-                                   file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True)
+            with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
+                st.code(
+                    "Merhaba {name},\n"
+                    "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
+                    "Dosyayı butondan görüntüleyebilirsiniz.\n",
+                    language="text"
+                )
