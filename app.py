@@ -518,19 +518,40 @@ def fill_expenses_to_apsiyon(
     g1t, g1a = "Gider1 Tutarı", "Gider1 Açıklaması"
     g2t, g2a = "Gider2 Tutarı", "Gider2 Açıklaması"
     g3t, g3a = "Gider3 Tutarı", "Gider3 Açıklaması"
-    for idx, row in df.iterrows():
-        did = make_did(row.get("Blok", ""), row.get("Daire No", ""))
-        if did in totals:
-            t = totals[did]
-            if mode.startswith("Seçenek 1"):
-                df.at[idx, g1t] = t.get("sicak", 0.0); df.at[idx, g1a] = exp1 or ""
-                df.at[idx, g2t] = t.get("su", 0.0);    df.at[idx, g2a] = exp2 or ""
-                df.at[idx, g3t] = t.get("isitma", 0.0);df.at[idx, g3a] = exp3 or ""
-            else:
-                df.at[idx, g1t] = t.get("toplam", 0.0); df.at[idx, g1a] = exp1 or ""
-                df.at[idx, g2t] = None; df.at[idx, g2a] = None
-                df.at[idx, g3t] = None; df.at[idx, g3a] = None
-    return df
+   for idx, row in df.iterrows():
+    did = make_did(row.get("Blok", ""), row.get("Daire No", ""))
+    if did in totals:
+        t = totals[did]
+
+        if mode.startswith("Seçenek 1"):
+            # G1=Sıcak Su, G2=Su, G3=Isıtma
+            df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
+            df.at[idx, g2t] = t.get("su", 0.0);     df.at[idx, g2a] = exp2 or ""
+            df.at[idx, g3t] = t.get("isitma", 0.0); df.at[idx, g3a] = exp3 or ""
+
+        elif mode.startswith("Seçenek 2"):
+            # G1=Toplam, G2/G3 boş
+            df.at[idx, g1t] = t.get("toplam", 0.0); df.at[idx, g1a] = exp1 or ""
+            df.at[idx, g2t] = None; df.at[idx, g2a] = None
+            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+
+        elif mode.startswith("Seçenek 3"):
+            # G1=Sıcak Su
+            df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
+            df.at[idx, g2t] = None; df.at[idx, g2a] = None
+            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+
+        elif mode.startswith("Seçenek 4"):
+            # G1=Su
+            df.at[idx, g1t] = t.get("su", 0.0);     df.at[idx, g1a] = exp1 or ""
+            df.at[idx, g2t] = None; df.at[idx, g2a] = None
+            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+
+        elif mode.startswith("Seçenek 5"):
+            # G1=Isıtma
+            df.at[idx, g1t] = t.get("isitma", 0.0); df.at[idx, g1a] = exp1 or ""
+            df.at[idx, g2t] = None; df.at[idx, g2a] = None
+            df.at[idx, g3t] = None; df.at[idx, g3a] = None    return df
 
 def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xlsx") -> bytes:
     from io import BytesIO
@@ -969,11 +990,17 @@ with tab_b:
     colM1, colM2 = st.columns(2)
     with colM1:
         aps_mode = st.radio(
-            "Doldurma Şekli",
-            ["Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)", "Seçenek 2 (G1=Toplam, G2/G3 boş)"],
-            index=0,
-            key="aps_mode"
-        )
+    "Doldurma Şekli",
+    [
+        "Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)",
+        "Seçenek 2 (G1=Toplam, G2/G3 boş)",
+        "Seçenek 3 (G1=Sıcak Su)",
+        "Seçenek 4 (G1=Su)",
+        "Seçenek 5 (G1=Isıtma)"
+    ],
+    index=0,
+    key="aps_mode"
+)
     with colM2:
         exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su", key="aps_exp1")
         exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su", key="aps_exp2")
