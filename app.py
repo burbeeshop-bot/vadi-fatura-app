@@ -1,5 +1,6 @@
 # app.py
 # === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Dropbox UUID Upload entegre) ===
+
 import io, os, re, zipfile, unicodedata, uuid, json, base64
 from typing import List, Dict, Tuple, Optional
 
@@ -594,7 +595,7 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Dropbox — HTTP API Yardımcıları (SDK YOK)
+# Dropbox Helpers (HTTP ile) — upload + paylaşım linki
 # -----------------------------------------------------------------------------
 def _dbx_headers(token: str, extra: dict | None = None) -> dict:
     h = {"Authorization": f"Bearer {token}"}
@@ -602,14 +603,9 @@ def _dbx_headers(token: str, extra: dict | None = None) -> dict:
         h.update(extra)
     return h
 
-def dropbox_whoami(token: str):
-    url = "https://api.dropboxapi.com/2/users/get_current_account"
-    r = requests.post(url, headers=_dbx_headers(token, {"Content-Type": "application/json"}), timeout=30)
-    return r.status_code, (r.json() if r.ok else r.text)
-
 def dropbox_upload_bytes(token: str, path: str, data: bytes) -> dict:
     """
-    /2/files/upload — 'path' ile yükler.
+    /2/files/upload — App’inin erişebildiği alana 'path' ile yükler.
     path ör: '/AtlasVadi_Faturalar/hello.txt'
     """
     url = "https://content.dropboxapi.com/2/files/upload"
@@ -646,7 +642,7 @@ def dropbox_create_shared_link(token: str, path: str) -> str:
     }
     resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
     if resp.status_code == 409:
-        # Zaten link varsa:
+        # Link zaten varsa, fetch edelim:
         url2 = "https://api.dropboxapi.com/2/sharing/list_shared_links"
         payload2 = {"path": path, "direct_only": True}
         resp2 = requests.post(url2, headers=headers, data=json.dumps(payload2), timeout=60)
@@ -662,7 +658,7 @@ def dropbox_create_shared_link(token: str, path: str) -> str:
 
 def dropbox_get_temporary_link(token: str, path: str) -> str:
     """
-    /2/files/get_temporary_link — 4 saatlik tekil link.
+    /2/files/get_temporary_link — 4 saatlik tekil link (enumerable değil).
     scopes: files.content.read yeterli.
     """
     url = "https://api.dropboxapi.com/2/files/get_temporary_link"
@@ -673,33 +669,32 @@ def dropbox_get_temporary_link(token: str, path: str) -> str:
         raise RuntimeError(f"Dropbox temp link hata: {resp.status_code} — {resp.text}")
     return resp.json()["link"]
 
-def dropbox_upload_fileobj_uuid(token: str, fileobj: io.BytesIO, original_name: str, parent_folder_path: str) -> dict:
+def dropbox_upload_uuid_and_share(file_bytes: bytes, original_name: str, parent_folder: str) -> Tuple[str, str]:
     """
-    BytesIO'dan PDF'i benzersiz UUID isimle 'parent_folder_path' altına yükler, paylaşımlı link döndürür.
-    return: {'path': path_lower, 'url': shared_link}
+    Bytes'ı parent_folder altına UUID adla yükler, paylaşım linkini döner.
+    return: (dropbox_path, shared_url)
     """
-    if not parent_folder_path.startswith("/"):
-        parent_folder_path = "/" + parent_folder_path
-    parent_folder_path = parent_folder_path.rstrip("/")
+    token = st.secrets.get("dropbox", {}).get("access_token", "")
+    if not token:
+        raise RuntimeError("Dropbox access token yok. secrets.toml -> [dropbox].access_token")
+
+    if not parent_folder.startswith("/"):
+        parent_folder = "/" + parent_folder
+    parent_folder = parent_folder.rstrip("/")
 
     ext = os.path.splitext(original_name)[1] or ".pdf"
     safe_name = f"{uuid.uuid4().hex}{ext}"
-    dropbox_path = f"{parent_folder_path}/{safe_name}"
-
-    fileobj.seek(0)
-    meta = dropbox_upload_bytes(token, dropbox_path, fileobj.read())
-    path_lower = meta.get("path_lower", dropbox_path)
-
-    # Kalıcı link dene; olmazsa geçici link
+    path = f"{parent_folder}/{safe_name}"
+    meta = dropbox_upload_bytes(token, path, file_bytes)
     try:
-        url = dropbox_create_shared_link(token, path_lower)
+        url = dropbox_create_shared_link(token, meta["path_lower"])
     except Exception:
-        url = dropbox_get_temporary_link(token, path_lower)
-
-    return {"path": path_lower, "url": url}
+        # fallback: geçici link (4 saat)
+        url = dropbox_get_temporary_link(token, meta["path_lower"])
+    return meta.get("path_display", path), url
 
 # -----------------------------------------------------------------------------
-# Basit Dropbox test paneli (opsiyonel)
+# Basit Dropbox test paneli (opsiyonel) — SADECE Tab C içinde expander olarak çağrılacak
 # -----------------------------------------------------------------------------
 def dropbox_upload_test_panel(default_folder="/AtlasVadi_Faturalar"):
     st.subheader("Dropbox testleri")
@@ -708,9 +703,13 @@ def dropbox_upload_test_panel(default_folder="/AtlasVadi_Faturalar"):
         if not token_present:
             st.error("Secrets içinde [dropbox].access_token yok.")
         else:
-            code, payload = dropbox_whoami(st.secrets["dropbox"]["access_token"])
-            st.write("get_current_account:", code)
-            st.json(payload if isinstance(payload, dict) else {"error": payload})
+            r = requests.post(
+                "https://api.dropboxapi.com/2/users/get_current_account",
+                headers={"Authorization": f"Bearer {st.secrets['dropbox']['access_token']}",
+                         "Content-Type": "application/json"}
+            )
+            st.write("get_current_account:", r.status_code)
+            st.json(r.json() if r.ok else {"error": r.text})
 
     folder = st.text_input("Klasör yolu", default_folder)
     if st.button("📄 hello.txt yükle"):
@@ -720,13 +719,9 @@ def dropbox_upload_test_panel(default_folder="/AtlasVadi_Faturalar"):
             try:
                 path = f"{folder.rstrip('/')}/hello.txt"
                 meta = dropbox_upload_bytes(st.secrets["dropbox"]["access_token"], path, b"hello from streamlit")
-                st.write("upload: OK")
-                st.json(meta)
+                st.success(f"Yüklendi: {meta.get('path_display')}")
             except Exception as e:
                 st.error(str(e))
-
-# ⬇️ SADECE UI’ı çizmek için argümansız çağırın
-dropbox_upload_test_panel()
 
 # -----------------------------------------------------------------------------
 # UI — 3 Sekme
@@ -743,9 +738,8 @@ tab_a, tab_b, tab_c = st.tabs([
 with tab_a:
     pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"], key="pdf_a")
 
-    # Yüklenince belleğe al ve session_state'e koy
     if pdf_file:
-        st.session_state["pdf_bytes"] = pdf_file.read()
+        st.session_state["pdf_bytes"] = pdf_file.getvalue()
 
     st.subheader("Alt Yazı Kaynağı")
     t1, t2 = st.tabs(["✍️ Metin alanı", "📄 .docx yükle (opsiyonel)"])
@@ -821,13 +815,14 @@ with tab_a:
     go = st.button("🚀 Başlat", key="go_a")
 
     if go:
-        pdf_bytes = st.session_state.get("pdf_bytes")
-        if not pdf_bytes:
+        if not pdf_file:
             st.warning("Lütfen önce bir PDF yükleyin.")
             st.stop()
 
+        src = pdf_file.read()
+
         if mode == "Sadece sayfalara böl":
-            pages = split_pdf(pdf_bytes)
+            pages = split_pdf(src)
             with io.BytesIO() as zbuf:
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
                     for name, data in pages:
@@ -836,7 +831,7 @@ with tab_a:
 
         elif mode == "Sadece alt yazı uygula (tek PDF)":
             stamped = add_footer_to_pdf(
-                pdf_bytes,
+                src,
                 footer_text=footer_text,
                 font_size=font_size,
                 leading=leading,
@@ -865,7 +860,7 @@ with tab_a:
                 pad_y=pad_y,
             )
             pages = add_footer_and_stamp_per_page(
-                src_bytes=pdf_bytes,
+                src_bytes=src,
                 footer_kwargs=footer_kwargs,
                 stamp_on=stamp_on,
                 label_tpl=label_tpl,
@@ -1030,7 +1025,7 @@ with tab_c:
         st.markdown("### 🔐 Dropbox’a yükle ve tekil (UUID) link üret — önerilen güvenli yöntem")
         with st.expander("Dropbox yükleme (dosya bazında paylaşımlı link)", expanded=False):
             dcol1, dcol2 = st.columns([2,1])
-            dropbox_folder = dcol1.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar", help="Örn: /AtlasVadi_Faturalar (varsa kullanılır, yoksa otomatik oluşturulur)")
+            dropbox_folder = dcol1.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar", help="Örn: /AtlasVadi_Faturalar")
             upload_btn = dcol2.button("☁️ Yükle", use_container_width=True)
 
             token_present = bool(st.secrets.get("dropbox", {}).get("access_token"))
@@ -1055,15 +1050,12 @@ with tab_c:
                 total = len(pdf_infos)
                 done = 0
 
-                DBX_TOKEN = st.secrets["dropbox"]["access_token"]
-
                 for info in pdf_infos:
                     base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
                     data = zf.read(info)
-                    bio = io.BytesIO(data)
                     try:
-                        meta = dropbox_upload_fileobj_uuid(DBX_TOKEN, bio, base, dropbox_folder)
-                        uploaded_map[base] = meta["url"]
+                        _, link = dropbox_upload_uuid_and_share(data, base, dropbox_folder)
+                        uploaded_map[base] = link
                     except Exception as e:
                         st.warning(f"Yükleme hatası ({base}): {e}")
                     done += 1
@@ -1092,43 +1084,8 @@ with tab_c:
 
                 st.download_button("📥 uploaded_map.json", json.dumps(uploaded_map, ensure_ascii=False, indent=2).encode("utf-8"),
                                    file_name="uploaded_map.json")
-                st.info("Her dosya benzersiz UUID isimli ve yalnızca dosya bazında paylaşım linki üretildi. Klasörden listeleme yapmadan tahminle erişilemez.")
+                st.info("Her dosya benzersiz UUID adla yüklendi ve dosya bazında link üretildi.")
 
-# ---- UI: Dropbox Bağlantı Testi (kolay) ----
-st.markdown("### 🔎 Dropbox Bağlantı Testi")
-DBX_TOKEN = st.secrets.get("dropbox", {}).get("access_token", "")
-st.write(f"Dropbox token: {'✅ var' if DBX_TOKEN else '❌ yok (secrets’a ekleyin)'}")
-
-col_t1, col_t2, col_t3 = st.columns(3)
-with col_t1:
-    test_folder = st.text_input("Dropbox klasör yolu", value="/AtlasVadi_Faturalar",
-                                help="App türüne göre: 'App folder' ise app köküne göre, 'Full Dropbox' ise tam kök.")
-with col_t2:
-    test_filename = st.text_input("Test dosya adı", value="hello.txt")
-with col_t3:
-    do_test = st.button("🧪 Test yükleme + link")
-
-if do_test:
-    if not DBX_TOKEN:
-        st.error("Dropbox token yok. Secrets’ı düzeltin.")
-    else:
-        try:
-            resp_code, who = dropbox_whoami(DBX_TOKEN)
-            if resp_code != 200:
-                st.error(f"Token geçersiz / scope eksik: {resp_code} — {who}")
-                st.stop()
-
-            path = f"{test_folder.rstrip('/')}/{test_filename}"
-            meta = dropbox_upload_bytes(DBX_TOKEN, path, b"Merhaba Atlas Vadi!")
-            st.success(f"Yüklendi: {meta.get('path_display')}")
-
-            try:
-                link = dropbox_create_shared_link(DBX_TOKEN, meta["path_lower"])
-                st.write("🔗 Paylaşım linki (kalıcı):", link)
-            except Exception as e1:
-                st.warning(f"Kalıcı link üretilemedi (sharing.write yok olabilir): {e1}")
-                tlink = dropbox_get_temporary_link(DBX_TOKEN, meta["path_lower"])
-                st.write("⏳ Geçici link (4 saat):", tlink)
-
-        except Exception as e:
-            st.error(f"Test hata: {e}")
+    # --- Sadece bu sekmede görünen test paneli ---
+    with st.expander("🔎 Dropbox testleri (isteğe bağlı)", expanded=False):
+        dropbox_upload_test_panel()
