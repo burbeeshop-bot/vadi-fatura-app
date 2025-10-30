@@ -1237,8 +1237,190 @@ with wa_tab2:
                     "Dosyayı butondan görüntüleyebilirsiniz.\n",
                     language="text"
                 )
-# ---------------- TAB D: WhatsApp Gönder (Cloud API) ----------------
-tab_d = st.tabs(["📲 WhatsApp Gönder (Cloud API)"])[0]
-with tab_d:
+# ---------------- TAB W: WhatsApp Gönder (Cloud API) ----------------
+with tab_w:
     st.markdown("### 📲 WhatsApp Gönder (Meta Cloud API)")
-    # (buraya az önce sana verdiğim uzun kod bloğunu yapıştır)
+
+    st.info("İlk mesajı **şablon** ile başlatmalısın. Sonrasında 24 saat içinde serbest metin / belge gönderebilirsin.")
+
+    colK1, colK2 = st.columns(2)
+    with colK1:
+        csv_up = st.file_uploader("WhatsApp_Recipients.csv yükle", type=["csv"], key="wa_send_csv")
+    with colK2:
+        preview_btn = st.button("Önizle", use_container_width=True, key="wa_preview")
+
+    # API Kimlikleri (secrets varsa otomatik doldur)
+    st.markdown("#### Cloud API Ayarları")
+    default_token = st.secrets.get("whatsapp", {}).get("token", "")
+    default_phone_id = st.secrets.get("whatsapp", {}).get("phone_number_id", "")
+    colA1, colA2 = st.columns(2)
+    with colA1:
+        wa_token = st.text_input("Access Token", value=default_token, type="password", help="Meta for Developers → WhatsApp → System User token (mümkünse kalıcı).")
+    with colA2:
+        phone_number_id = st.text_input("Phone Number ID", value=default_phone_id, help="WABA içindeki WhatsApp numaranızın ID’si")
+
+    st.markdown("#### Şablonla Başlat (zorunlu ilk mesaj)")
+    colT1, colT2, colT3 = st.columns(3)
+    with colT1:
+        template_name = st.text_input("Template adı", value="fatura_bildirimi")  # Örn: fatura_bildirimi
+    with colT2:
+        template_lang = st.text_input("Dil (BCP-47)", value="tr")  # tr, tr_TR gibi
+    with colT3:
+        header_document = st.checkbox("Şablon header'ı belge (document) kullansın", value=False,
+                                      help="Şablonunuz 'HEADER: DOCUMENT' içeriyorsa işaretleyin. PDF linkini header’a koyacağız.")
+
+    st.caption("Örnek şablon gövdesi (Meta'da oluşturup onaylat):\n"
+               "Merhaba {{1}},\n{{2}} dairenizin bildirimi hazırdır.\nDosya: {{3}}")
+
+    st.markdown("#### 24 saat PENCERE AÇILDIKTAN SONRA opsiyonel mesaj")
+    colF1, colF2 = st.columns(2)
+    with colF1:
+        send_followup_text = st.checkbox("Ardından serbest metin gönder", value=False)
+        followup_text = st.text_area("Serbest metin", value="Merhaba {name},\n{daire_id} dairenizin PDF bildirimi ektedir:\n{file_url}")
+    with colF2:
+        send_document = st.checkbox("Ardından PDF'yi belge (document) olarak gönder", value=True,
+                                    help="file_url doğrudan indirilebilir/görüntülenebilir olmalı.")
+
+    go_send = st.button("🚀 Gönderimi Başlat", use_container_width=True, key="wa_send")
+
+    import time, requests
+    import pandas as pd
+
+    def _ok_number(s: str) -> str:
+        s = str(s or "").strip()
+        # "+90..." formatı bekliyoruz; yoksa basit normalize
+        s = s.replace(" ", "")
+        if s.startswith("05") and len(s) == 11:
+            return "+90" + s[1:]
+        if s.startswith("5") and len(s) == 10:
+            return "+90" + s
+        if s.startswith("0") and len(s) in (10,11):
+            return "+90" + s[1:]
+        return s
+
+    def send_template(access_token: str, phone_id: str, to: str, t_name: str, lang: str, name: str, daire_id: str, file_url: str, header_doc=False):
+        url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+        components = []
+        # BODY vars
+        components.append({
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": name or ""},
+                {"type": "text", "text": daire_id or ""},
+                {"type": "text", "text": file_url or ""},
+            ]
+        })
+        # HEADER document varsa (şablonunuzda HEADER: DOCUMENT tanımlı olmalı)
+        if header_doc and file_url:
+            components.insert(0, {
+                "type": "header",
+                "parameters": [
+                    {"type": "document", "document": {"link": file_url, "filename": f"{daire_id or 'Dosya'}.pdf"}}
+                ]
+            })
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": t_name,
+                "language": {"code": lang},
+                "components": components
+            }
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        return r
+
+    def send_text(access_token: str, phone_id: str, to: str, text: str):
+        url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"preview_url": True, "body": text}
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        return r
+
+    def send_document_msg(access_token: str, phone_id: str, to: str, file_url: str, caption: str):
+        url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "document",
+            "document": {"link": file_url, "caption": caption}
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        return r
+
+    if preview_btn and csv_up:
+        df = pd.read_csv(csv_up, dtype=str).fillna("")
+        st.dataframe(df.head(50), use_container_width=True)
+        st.success(f"{len(df)} alıcı yüklendi.")
+
+    if go_send:
+        # doğrulamalar
+        if not csv_up:
+            st.error("Önce CSV yükleyin."); st.stop()
+        if not wa_token or not phone_number_id:
+            st.error("Access Token ve Phone Number ID gerekir."); st.stop()
+        df = pd.read_csv(csv_up, dtype=str).fillna("")
+        if not {"phone","name","daire_id","file_url"}.issubset(set(df.columns)):
+            st.error("CSV kolonları eksik. Gerekli: phone, name, daire_id, file_url")
+            st.stop()
+
+        send_results = []
+        progress = st.progress(0)
+        total = len(df)
+        success_cnt = 0
+        fail_cnt = 0
+
+        for i, row in df.iterrows():
+            to = _ok_number(row.get("phone", ""))
+            name = row.get("name","")
+            did  = row.get("daire_id","")
+            furl = row.get("file_url","")
+
+            # 1) Şablonla başlat
+            try:
+                r1 = send_template(wa_token, phone_number_id, to, template_name, template_lang, name, did, furl, header_doc=header_document)
+                if r1.ok:
+                    success = True
+                    info = "template OK"
+                else:
+                    success = False
+                    info = f"template ERR {r1.status_code}: {r1.text}"
+            except Exception as e:
+                success = False
+                info = f"template EXC: {e}"
+            send_results.append({"to": to, "step": "template", "ok": success, "info": info})
+            success_cnt += 1 if success else 0
+            fail_cnt    += 0 if success else 1
+
+            # 2) Pencere açıksa follow-up (opsiyonel)
+            if success:
+                # küçük bekleme (rate limit / ordering)
+                time.sleep(0.4)
+                if send_followup_text and followup_text:
+                    try:
+                        msg = followup_text.format(name=name, daire_id=did, file_url=furl)
+                    except Exception:
+                        msg = followup_text
+                    r2 = send_text(wa_token, phone_number_id, to, msg)
+                    send_results.append({"to": to, "step": "text", "ok": r2.ok, "info": ("" if r2.ok else f"{r2.status_code}: {r2.text}")})
+                    time.sleep(0.3)
+                if send_document and furl:
+                    cap = f"{did} bildirimi"
+                    r3 = send_document_msg(wa_token, phone_number_id, to, furl, cap)
+                    send_results.append({"to": to, "step": "document", "ok": r3.ok, "info": ("" if r3.ok else f"{r3.status_code}: {r3.text}")})
+                    time.sleep(0.3)
+
+            progress.progress((i+1)/total)
+
+        st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
+        st.dataframe(pd.DataFrame(send_results), use_container_width=True)
