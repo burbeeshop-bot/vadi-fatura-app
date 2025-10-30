@@ -1238,7 +1238,7 @@ with wa_tab2:
                     language="text"
                 )
 import io
-
+from googleapiclient.http import MediaIoBaseUpload
 st.subheader("📤 Drive’a Test Yükleme")
 
 if st.button("Hello.txt test yükle"):
