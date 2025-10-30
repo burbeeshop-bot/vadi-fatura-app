@@ -980,7 +980,7 @@ with tab_c:
                     scopes = ["https://www.googleapis.com/auth/drive"]
                     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
                     service = build("drive", "v3", credentials=creds, cache_discovery=False)
-                    except Exception as e:
+                except Exception as e:
                     st.error(f"Drive servisine bağlanılamadı: {e}")
                     st.stop()
 
