@@ -511,47 +511,52 @@ def fill_expenses_to_apsiyon(
     exp3: str,
 ) -> pd.DataFrame:
     df = df_in.copy()
+
     def make_did(blok, dno) -> str:
         b = str(blok).strip().upper()
         d = _pad3_aps(dno)
         return f"{b}-{d}"
+
     g1t, g1a = "Gider1 Tutarı", "Gider1 Açıklaması"
     g2t, g2a = "Gider2 Tutarı", "Gider2 Açıklaması"
     g3t, g3a = "Gider3 Tutarı", "Gider3 Açıklaması"
-   for idx, row in df.iterrows():
-    did = make_did(row.get("Blok", ""), row.get("Daire No", ""))
-    if did in totals:
-        t = totals[did]
 
-        if mode.startswith("Seçenek 1"):
-            # G1=Sıcak Su, G2=Su, G3=Isıtma
-            df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
-            df.at[idx, g2t] = t.get("su", 0.0);     df.at[idx, g2a] = exp2 or ""
-            df.at[idx, g3t] = t.get("isitma", 0.0); df.at[idx, g3a] = exp3 or ""
+    for idx, row in df.iterrows():
+        did = make_did(row.get("Blok", ""), row.get("Daire No", ""))
+        if did in totals:
+            t = totals[did]
 
-        elif mode.startswith("Seçenek 2"):
-            # G1=Toplam, G2/G3 boş
-            df.at[idx, g1t] = t.get("toplam", 0.0); df.at[idx, g1a] = exp1 or ""
-            df.at[idx, g2t] = None; df.at[idx, g2a] = None
-            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+            if mode.startswith("Seçenek 1"):
+                # G1=Sıcak Su, G2=Su, G3=Isıtma
+                df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = t.get("su", 0.0);     df.at[idx, g2a] = exp2 or ""
+                df.at[idx, g3t] = t.get("isitma", 0.0); df.at[idx, g3a] = exp3 or ""
 
-        elif mode.startswith("Seçenek 3"):
-            # G1=Sıcak Su
-            df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
-            df.at[idx, g2t] = None; df.at[idx, g2a] = None
-            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+            elif mode.startswith("Seçenek 2"):
+                # G1=Toplam, G2/G3 boş
+                df.at[idx, g1t] = t.get("toplam", 0.0); df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None; df.at[idx, g2a] = None
+                df.at[idx, g3t] = None; df.at[idx, g3a] = None
 
-        elif mode.startswith("Seçenek 4"):
-            # G1=Su
-            df.at[idx, g1t] = t.get("su", 0.0);     df.at[idx, g1a] = exp1 or ""
-            df.at[idx, g2t] = None; df.at[idx, g2a] = None
-            df.at[idx, g3t] = None; df.at[idx, g3a] = None
+            elif mode.startswith("Seçenek 3"):
+                # G1=Sıcak Su
+                df.at[idx, g1t] = t.get("sicak", 0.0);  df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None; df.at[idx, g2a] = None
+                df.at[idx, g3t] = None; df.at[idx, g3a] = None
 
-        elif mode.startswith("Seçenek 5"):
-            # G1=Isıtma
-            df.at[idx, g1t] = t.get("isitma", 0.0); df.at[idx, g1a] = exp1 or ""
-            df.at[idx, g2t] = None; df.at[idx, g2a] = None
-            df.at[idx, g3t] = None; df.at[idx, g3a] = None    return df
+            elif mode.startswith("Seçenek 4"):
+                # G1=Su
+                df.at[idx, g1t] = t.get("su", 0.0);     df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None; df.at[idx, g2a] = None
+                df.at[idx, g3t] = None; df.at[idx, g3a] = None
+
+            elif mode.startswith("Seçenek 5"):
+                # G1=Isıtma
+                df.at[idx, g1t] = t.get("isitma", 0.0); df.at[idx, g1a] = exp1 or ""
+                df.at[idx, g2t] = None; df.at[idx, g2a] = None
+                df.at[idx, g3t] = None; df.at[idx, g3a] = None
+
+    return df
 
 def export_excel_bytes(df: pd.DataFrame, filename: str = "Apsiyon_Doldurulmus.xlsx") -> bytes:
     from io import BytesIO
