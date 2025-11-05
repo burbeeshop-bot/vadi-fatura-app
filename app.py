@@ -1565,6 +1565,228 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
+        # ---------------- TAB GG: Gelir-Gider PDF Dönüştürücü ----------------
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+
+def _grab_amount(block_text: str, label: str) -> float:
+    """
+    Verilen metin bloğunda label'dan sonraki ilk TL tutarı yakalar.
+    """
+    # nokta binlik, virgül ondalık destekli sayı
+    pat = rf"{re.escape(label)}[^\d\-]*([0-9\.\,\-]+)"
+    m = re.search(pat, block_text, flags=re.IGNORECASE)
+    return _to_float_tr(m.group(1)) if m else 0.0
+
+def _find_lines(block_text: str, labels: list[str]) -> list[tuple[str, float]]:
+    out = []
+    for lab in labels:
+        val = _grab_amount(block_text, lab)
+        if val != 0.0:
+            out.append((lab, val))
+    return out
+
+def parse_gg_from_pdf(pdf_bytes: bytes) -> dict:
+    """
+    Apsiyon 'Özet Gelir-Gider' PDF'inden gider, gelir, toplamlara ilişkin sayıları çeker.
+    Çıkış:
+      {
+        "giderler": [(ad, tutar), ...],
+        "gelirler": [(ad, tutar), ...],
+        "toplam_gider": float,
+        "toplam_gelir": float,
+        "donem_farki": float,
+        "faaliyetler": [satırlar...]
+      }
+    """
+    rdr = PdfReader(io.BytesIO(pdf_bytes))
+    raw = "\n".join([(p.extract_text() or "") for p in rdr.pages])
+    norm = _normalize_tr(raw)
+
+    # Sıklıkla görülen kalem adlarını hedefleyelim (metne göre esnek)
+    gider_lbls = [
+        "SU VE ISINMA GIDERI",
+        "PERSONEL SSK PRIM +MUHTASAR GIDERLERI",
+        "SITE ICI ILACLAMA GIDERI",
+        "PERSONEL MAAS GIDERI",
+        "ORTAK ALAN ELEKTRIK",
+        "TELEFON, ULASIM, NAKLIYE, KIRTASIYE, BANKA PROVIZYON GIDERLERI",
+        "IS GUVENLIGI UZMANI",
+        "SU+DOGALGAZ",
+        "HIDRAFOR LOGAR SU MOTORLARI BAKIM TAMIRAT GID",
+        "TEMIZLIK MALZEMELERI IS KIYAFETLERI",
+        "HUKUKI DANISMANLIK VE AVUKATLIK",
+        "MALI MUSAVIRLIK VE MUHASEBE ISLEMLERI",
+        "DEMIRBAS VE ONGORULEMEYEN GIDERLER",
+        "ASANSOR PERIYODIK BAKIM",
+        "BAHCE BAKIM VE PEYZAJ GIDERI",
+        "TEMSIL AGIRLAMA GIDERI",
+        "HAVUZ BAKIMI VE KIMYASAL GIDERLER",
+        "APSIYON YAZILIM PROGRAM GIDERI",
+    ]
+    gelir_lbls = [
+        "AIDAT GELIRI",
+        "SU, SICAK SU  GELIRI",
+        "GECIKME TAZMINATI TAHAKKUKU",
+        "OGS SATIS GELIRI",
+        "BANKA FAIZ GELIRI",
+        "LUNCH ALANI KIRALAMA GELIRI",
+    ]
+
+    # 'GIDERLER' ve 'GELIRLER' bloklarını ayırmaya çalış
+    # (başlıklar arası kesit al)
+    def _slice_between(text, start_kw, end_kw):
+        s = text.find(start_kw)
+        if s == -1: return text
+        e = text.find(end_kw, s+len(start_kw)) if end_kw else -1
+        return text[s:e] if e != -1 else text[s:]
+
+    gider_block = _slice_between(norm, "GIDERLER", "GELIRLER")
+    gelir_block = _slice_between(norm, "GELIRLER", "ALACAKLARIMIZ")
+
+    giderler = _find_lines(gider_block, gider_lbls)
+    gelirler = _find_lines(gelir_block, gelir_lbls)
+
+    toplam_gider = _grab_amount(norm, "GIDER TOPLAMI")
+    toplam_gelir = _grab_amount(norm, "GELIR TOPLAMI")
+
+    # DÖNEM FARKI (fazlası/eksigi)
+    donem_farki = 0.0
+    for key in ["DONEM GIDER FAZLASI", "DONEM GELIR FAZLASI", "DONEM FARKI"]:
+        v = _grab_amount(norm, key)
+        if v != 0.0:
+            # metinde eksi olabiliyor, işareti koruyalım
+            sign_m = re.search(rf"{key}[^\d\-]*([\-])?[0-9\.\,]+", norm)
+            if sign_m and sign_m.group(1) == "-":
+                v = -abs(v)
+            donem_farki = v
+            break
+
+    # "2025 EYLÜL AYI FAALİYETLERİMİZ" altındaki madde satırlarını yakala
+    faaliyetler = []
+    fx = re.search(r"FAALIYETLERIMIZ(.+)$", norm, flags=re.DOTALL)
+    if fx:
+        tail = fx.group(1)
+        for line in tail.split("\n"):
+            line = line.strip()
+            if re.search(r"\d{2}\.\d{2}\.\d{4}", line):
+                faaliyetler.append(line)
+
+    return {
+        "giderler": giderler,
+        "gelirler": gelirler,
+        "toplam_gider": toplam_gider,
+        "toplam_gelir": toplam_gelir,
+        "donem_farki": donem_farki,
+        "faaliyetler": faaliyetler,
+    }
+
+def build_gg_pdf(data: dict, site_adi: str, baslik: str) -> bytes:
+    """
+    Çıkan veriyi rapor PDF'ine döker (A4 yatay iki kolon).
+    """
+    page_w, page_h = A4  # (595x842 pt)
+    # Yatay yerleşim için sayfayı döndürmeye gerek yok; iki sütun tasarlayalım.
+    margin = 18*mm
+    col_gap = 12*mm
+    col_w = (page_w - 2*margin - col_gap) / 2.0
+    y = page_h - margin
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+
+    # Üst başlık
+    c.setFont("NotoSans-Bold", 14)
+    c.drawString(margin, y, f"{site_adi.upper()} {baslik.upper()}")
+    y -= 10*mm
+
+    # Sol kolon: GİDERLER
+    xL = margin
+    xR = margin + col_w + col_gap
+
+    def _draw_table(x, y_top, title, rows):
+        c.setFont("NotoSans-Bold", 11)
+        c.drawString(x, y_top, title)
+        y = y_top - 6*mm
+        c.setFont("NotoSans-Regular", 10)
+        for name, val in rows:
+            txt = name.title()
+            c.drawString(x, y, txt)
+            c.drawRightString(x + col_w, y, f"{val:,.2f} TL".replace(",", "X").replace(".", ",").replace("X", "."))
+            y -= 5.2*mm
+            if y < 30*mm:
+                c.showPage(); y = page_h - margin; c.setFont("NotoSans-Bold", 11); c.drawString(x, y, title); y -= 6*mm; c.setFont("NotoSans-Regular", 10)
+        return y
+
+    yL = _draw_table(xL, y, "GİDERLER", data.get("giderler", []))
+    # Gider toplamı
+    c.setFont("NotoSans-Bold", 10)
+    c.drawString(xL, yL-2*mm, "GİDER TOPLAMI")
+    c.drawRightString(xL + col_w, yL-2*mm, f"{data.get('toplam_gider',0.0):,.2f} TL".replace(",", "X").replace(".", ",").replace("X", "."))
+    yL -= 10*mm
+
+    # Sağ kolon: GELİRLER
+    yR = _draw_table(xR, y, "GELİRLER", data.get("gelirler", []))
+    c.setFont("NotoSans-Bold", 10)
+    c.drawString(xR, yR-2*mm, "GELİR TOPLAMI")
+    c.drawRightString(xR + col_w, yR-2*mm, f"{data.get('toplam_gelir',0.0):,.2f} TL".replace(",", "X").replace(".", ",").replace("X", "."))
+    yR -= 8*mm
+
+    # Dönem farkı (vurgulu)
+    dfark = data.get("donem_farki", 0.0)
+    c.setFont("NotoSans-Bold", 10)
+    c.drawString(xR, yR-2*mm, "DÖNEM FARKI")
+    c.setFillColorRGB(1, 1, 0.7)  # hafif vurgulu kutu
+    c.rect(xR + col_w - 45*mm, yR-5*mm, 45*mm, 7*mm, fill=1, stroke=0)
+    c.setFillColorRGB(0,0,0)
+    c.drawRightString(xR + col_w - 2*mm, yR-2*mm, f"{dfark:,.2f} TL".replace(",", "X").replace(".", ",").replace("X", "."))
+    yR -= 12*mm
+
+    # Alt: Faaliyetler
+    y_end = min(yL, yR)
+    if y_end < 50*mm:
+        c.showPage()
+        y_end = page_h - margin
+
+    acts = data.get("faaliyetler", [])
+    if acts:
+        c.setFont("NotoSans-Bold", 11)
+        c.drawString(margin, y_end, "AY İÇİ FAALİYETLER")
+        c.setFont("NotoSans-Regular", 10)
+        y = y_end - 6*mm
+        for line in acts:
+            for wrapped in wrap_by_width(line, "NotoSans-Regular", 10, page_w - 2*margin):
+                c.drawString(margin, y, wrapped)
+                y -= 5*mm
+                if y < 25*mm:
+                    c.showPage(); y = page_h - margin; c.setFont("NotoSans-Regular", 10)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+with st.expander("📑 Gelir-Gider PDF Dönüştürücü", expanded=True):
+    st.write("Apsiyon’dan indirdiğin **Özet Gelir-Gider** PDF’ini yükle; aynı düzenle yeni bir PDF üretelim.")
+    gg_pdf = st.file_uploader("Özet Gelir-Gider PDF", type=["pdf"], key="gg_pdf_up")
+    c1, c2 = st.columns(2)
+    with c1:
+        site_adi = st.text_input("Site adı", value="Atlas Vadi Sitesi")
+    with c2:
+        baslik  = st.text_input("Başlık", value="2025 EYLÜL AYI GELİR GİDER RAPORU")
+
+    if st.button("🧾 PDF’yi oluştur", use_container_width=True, key="gg_build"):
+        if not gg_pdf:
+            st.error("Önce PDF yükleyin."); st.stop()
+        try:
+            data = parse_gg_from_pdf(gg_pdf.read())
+        except Exception as e:
+            st.error(f"PDF çözümlenemedi: {e}")
+            st.stop()
+
+        out_pdf = build_gg_pdf(data, site_adi, baslik)
+        st.success("PDF hazır.")
+        st.download_button("📥 Raporu indir (PDF)", out_pdf, file_name="GelirGider_Raporu.pdf", mime="application/pdf")
         # ---------------- TAB R: Gelir-Gider Raporu (tek sayfa PDF, çift kolon) ----------------
 with tab_r:
     st.markdown("### 📑 Atlas Vadi – Gelir/Gider Raporu PDF üret")
