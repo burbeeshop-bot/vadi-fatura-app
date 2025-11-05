@@ -1804,7 +1804,7 @@ with tab_r:
         st.success("PDF hazır.")
         st.download_button("📥 Gelir-Gider Raporu.pdf", pdf_bytes, file_name="GelirGiderRaporu.pdf", mime="application/pdf")
 # ---------------- TAB GG: Gelir-Gider Dönüştürücü ----------------
-with tab_gg:
+    with tab_gg:
     st.subheader("📑 PDF’ten Gelir-Gider Tablosu Çıkar")
     gg_pdf = st.file_uploader("Gelir-Gider PDF (Apsiyon/özet PDF)", type=["pdf"], key="gg_pdf")
     st.caption("Not: Kalem isimleri PDF’teki başlıklara göre otomatik eşleştirilir. Uymayan satırlar 'ham' metin olarak da yazılır ki düzenleyebilesin.")
