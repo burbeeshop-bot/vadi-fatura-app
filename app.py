@@ -841,13 +841,13 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_w = st.tabs([
+tab_a, tab_b, tab_c, tab_w, tab_gg = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
     "📤 WhatsApp Gönderim Hazırlığı",
-    "📲 WhatsApp Gönder (Cloud API)"
+    "📲 WhatsApp Gönder (Cloud API)",
+    "📑 Gelir-Gider Dönüştürücü"
 ])
-
 # ---------------- TAB A: Böl & Alt Yazı ----------------
 with tab_a:
     pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"], key="pdf_a")
@@ -1043,7 +1043,115 @@ with tab_b:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_aps"
         )
+# -----------------------------------------------------------------------------
+# Gelir-Gider PDF Okuyucu (genel tablo)  —  PDF metninden kalem/tutar çıkarır
+# -----------------------------------------------------------------------------
+AMT_RX = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d{3})*,\d{2})(?!\d)")  # 1.234,56
 
+# Türkçe kalem adlarını normalize et (eşleştirmeyi sağlamlaştırır)
+def _norm_tr_token(s: str) -> str:
+    s = _normalize_tr(s).strip()
+    s = s.replace("  ", " ")
+    return s
+
+# İsim eşleştirme için beklenen kalem şablonları (anahtar → görülebilecek varyantlar)
+_GG_PATTERNS = {
+    "AİDAT GELİRLERİ":           [r"AIDAT GELIR", r"AIDAT GELIRLERI"],
+    "SU/ISINMA GELİRİ":          [r"SU VE ISINMA .* GELIR", r"SU\S* SICAK SU GELIRI", r"SU VE SICAK SU GELIRI"],
+    "GECIKME TAZMINATI":         [r"GECIKME TAZMINATI", r"GECIKME .* TAHSIL"],
+    "OGS SATIŞ GELİRİ":          [r"OGS SATIS GELIR"],
+    "BANKA FAİZ GELİRİ":         [r"BANKA FAIZ GELIR"],
+    "REKLAM/LUNCH KIRALAMA":     [r"REKLAM GELIR", r"LUNCH .* KIRALAMA GELIR"],
+    "DÖNEM GİDER FAZLASI":       [r"DONEM GIDER FAZLASI"],
+
+    "SU/ISINMA GİDERİ":          [r"SU VE ISINMA .* GIDER", r"SU\+DOGALGAZ"],
+    "ORTAK ALAN ELEKTRIK":       [r"ORTAK ALAN ELEKTRIK"],
+    "DOGALGAZ ORTAK ALAN":       [r"DOGALGAZ ORTAK ALAN"],
+    "TELEFON/ULASIM/BANKA/KIRT.": [r"TELEFON.*ULASIM.*KIRTASIYE.*BANKA", r"TELEFON,ULASIM,NAKLIYE,KIRTASIYE,BANKA"],
+    "IS GUVENLIGI":              [r"IS GUVENLIG"],
+    "APSIYON YAZILIM":           [r"APSIYON YAZILIM PROGRAM"],
+    "HIDRAFOR/LOGAR/SU MOTORLARI": [r"HIDRAFOR LOGAR SU MOTORLARI"],
+    "SITE ICI ILACLAMA":         [r"SITE ICI ILACLAMA"],
+    "TEMIZLIK MALZ. / IS KIYAFET": [r"TEMIZLIK MALZEMELERI.*IS KIYAFET"],
+    "BAHCE/PEYZAJ":              [r"BAHCE BAKIM .* PEYZAJ"],
+    "AVUKAT/HUKUKI DANISM.":     [r"HUKUKI DANISMANLIK .* AVUKAT"],
+    "MALI MUSAVIRLIK/MUHASEBE":  [r"MALI MUSAVIRLIK .* MUHASEBE"],
+    "TEMSİL/AGIRLAMA":           [r"TEMSIL .* AGIRLAMA"],
+    "ASANSOR PERIYODIK BAKIM":   [r"ASANSOR PERIYODIK BAKIM"],
+    "HAVUZ BAKIM/KIMYASAL":      [r"HAVUZ BAKIM.* KIMYASAL"],
+    "DEMIRBAS/ONGORULEMEYEN":    [r"DEMIRBAS .* ONGORU"],
+    "PERSONEL NET UCRETLER":     [r"PERSONEL NET UCRET"],
+    "PERSONEL SSK+MUHTASAR":     [r"PERSONEL SSK .* MUHTASAR"],
+    "ISKI ORTAK ALAN":           [r"ISKI ORTAK ALAN"],
+}
+
+# Basit eşleştirme yardımcısı
+def _match_key(line_norm: str) -> Optional[str]:
+    for key, pats in _GG_PATTERNS.items():
+        for p in pats:
+            if re.search(p, line_norm):
+                return key
+    return None
+
+def parse_income_expense_pdf(pdf_bytes: bytes) -> pd.DataFrame:
+    """
+    PDF içinden satır satır metni gezip 'Kalem' ve 'Tutar' yakalar, 'Tür' (Gelir/Gider) atar.
+    Toplamlar ayrıca hesaplanır. Dönüş: DataFrame[Kalem, Tutar, Tür]
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    rows = []
+    current_section = None  # "GELIR" | "GIDER" | None
+
+    for page in reader.pages:
+        raw = page.extract_text() or ""
+        # Bölümleri tahminlemek için büyük başlıkları ara
+        norm_lines = [_norm_tr_token(ln) for ln in raw.splitlines() if ln.strip()]
+        for ln_norm in norm_lines:
+            # Bölüm geçiş ipuçları
+            if re.search(r"\bGELIR(LER)?\b", ln_norm):
+                current_section = "GELIR"
+            elif re.search(r"\bGIDER(LER)?\b", ln_norm):
+                current_section = "GIDER"
+
+            # Tutar ara
+            m_amt = AMT_RX.search(ln_norm)
+            if not m_amt:
+                continue
+            amt = _to_float_tr(m_amt.group(1))
+
+            # Kalem adı
+            key = _match_key(ln_norm)
+            if not key:
+                # Toplam satırları ve notları atla
+                if "TOPLAM" in ln_norm or "GENEL TOPLAM" in ln_norm:
+                    continue
+                # Bulamadıysak ham satırı da ekleyelim (takip/tuning için)
+                key = ln_norm[:80]
+
+            tur = "Gelir" if current_section == "GELIR" else ("Gider" if current_section == "GIDER" else "Bilinmiyor")
+            rows.append({"Kalem": key, "Tutar": amt, "Tür": tur})
+
+    if not rows:
+        return pd.DataFrame(columns=["Kalem","Tutar","Tür"])
+
+    df = pd.DataFrame(rows)
+    # Aynı başlıklar toplanır
+    df = df.groupby(["Kalem","Tür"], as_index=False)["Tutar"].sum()
+    # Gelir/Gider sıralama
+    df["Tür"] = pd.Categorical(df["Tür"], categories=["Gelir","Gider","Bilinmiyor"], ordered=True)
+    df = df.sort_values(["Tür","Kalem"]).reset_index(drop=True)
+    return df
+
+def export_income_expense_excel(df: pd.DataFrame, filename: str = "GelirGider_Parsed.xlsx") -> bytes:
+    from io import BytesIO
+    bio = BytesIO()
+    # Özet sayfa + detay sayfa
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False, sheet_name="Detay")
+        # Pivot özet
+        piv = df.pivot_table(index="Tür", values="Tutar", aggfunc="sum").reset_index()
+        piv.to_excel(xw, index=False, sheet_name="Özet")
+    return bio.getvalue()
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
@@ -1457,3 +1565,49 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
+# ---------------- TAB GG: Gelir-Gider Dönüştürücü ----------------
+with tab_gg:
+    st.subheader("📑 PDF’ten Gelir-Gider Tablosu Çıkar")
+    gg_pdf = st.file_uploader("Gelir-Gider PDF (Apsiyon/özet PDF)", type=["pdf"], key="gg_pdf")
+    st.caption("Not: Kalem isimleri PDF’teki başlıklara göre otomatik eşleştirilir. Uymayan satırlar 'ham' metin olarak da yazılır ki düzenleyebilesin.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        parse_btn = st.button("🧾 Oku & Parse Et", use_container_width=True)
+    with c2:
+        st.write("")
+
+    if parse_btn:
+        if not gg_pdf:
+            st.warning("Önce PDF yükle."); st.stop()
+
+        try:
+            df_gg = parse_income_expense_pdf(gg_pdf.read())
+        except Exception as e:
+            st.error(f"PDF parse edilemedi: {e}")
+            st.stop()
+
+        if df_gg.empty:
+            st.warning("Herhangi bir kalem/tutar yakalanamadı. Kalem başlıkları için desenleri genişletmek gerekebilir.")
+            st.stop()
+
+        # Özet metrikler
+        total_gelir = float(df_gg.loc[df_gg["Tür"]=="Gelir","Tutar"].sum())
+        total_gider = float(df_gg.loc[df_gg["Tür"]=="Gider","Tutar"].sum())
+        kpi1, kpi2, kpi3 = st.columns(3)
+        with kpi1: st.metric("Toplam Gelir", f"{total_gelir:,.2f} TL".replace(",", "X").replace(".", ",").replace("X","."))
+        with kpi2: st.metric("Toplam Gider", f"{total_gider:,.2f} TL".replace(",", "X").replace(".", ",").replace("X","."))
+        with kpi3: st.metric("Dönem Net", f"{(total_gelir-total_gider):,.2f} TL".replace(",", "X").replace(".", ",").replace("X","."))
+
+        st.markdown("**Detay Tablo**")
+        st.dataframe(df_gg, use_container_width=True, height=520)
+
+        # Excel indirme
+        xls = export_income_expense_excel(df_gg)
+        st.download_button(
+            "📥 Excel indir (Detay + Özet)",
+            xls,
+            file_name="GelirGider_Parsed.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
