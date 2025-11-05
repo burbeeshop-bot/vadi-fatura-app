@@ -841,12 +841,12 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_w, tab_gg = st.tabs([
+tab_a, tab_b, tab_c, tab_w, tab_r = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
     "📤 WhatsApp Gönderim Hazırlığı",
     "📲 WhatsApp Gönder (Cloud API)",
-    "📑 Gelir-Gider Dönüştürücü"
+    "📑 Gelir-Gider Raporu (PDF)"
 ])
 # ---------------- TAB A: Böl & Alt Yazı ----------------
 with tab_a:
@@ -1565,6 +1565,244 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
+        # ---------------- TAB R: Gelir-Gider Raporu (tek sayfa PDF, çift kolon) ----------------
+with tab_r:
+    st.markdown("### 📑 Atlas Vadi – Gelir/Gider Raporu PDF üret")
+
+    st.info("Girdi dosyası basit bir tablo olmalı. İki yöntemden birini kullan:")
+    st.caption("""
+    **Yöntem A – Tek CSV/XLSX (önerilen)**  
+    Kolonlar:  Tür, Kalem, Tutar  
+    • Tür: 'GİDER' veya 'GELİR'  
+    • Tutar: 137.580,27 gibi TR formatı veya 137580.27
+    
+    **Yöntem B – İki ayrı tablo**  
+    Soldaki 'GİDERLER' ve sağdaki 'GELİRLER'i iki ayrı CSV/XLSX olarak yükle.
+    """)
+
+    mode_rep = st.radio(
+        "Girdi biçimi",
+        ["Tek dosyada 'Tür, Kalem, Tutar'", "Ayrı ayrı: Giderler dosyası + Gelirler dosyası"],
+        horizontal=True
+    )
+
+    from io import BytesIO
+    def _read_any_table(up):
+        name = (up.name or "").lower()
+        if name.endswith(".csv"):
+            df = pd.read_csv(BytesIO(up.read()), dtype=str).fillna("")
+        else:
+            df = pd.read_excel(BytesIO(up.read()), dtype=str, engine="openpyxl").fillna("")
+        return df
+
+    def _to_num(x: str) -> float:
+        s = str(x or "").strip()
+        # TR -> float
+        s = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s)
+        except:
+            return 0.0
+
+    def _split_tables_from_one(df):
+        # beklenen kolonlar: Tür | Kalem | Tutar (esnek isimlendirme)
+        ren = {c.lower().strip(): c for c in df.columns}
+        def pick(*alts):
+            for a in alts:
+                if a in ren: return ren[a]
+            return None
+        c_tur   = pick("tür","tur","type","kategori")
+        c_kalem = pick("kalem","açıklama","aciklama","item","hesap kalemi")
+        c_tutar = pick("tutar","tutar (try)","tutar tl","amount","tutarı","tutar (tl)")
+        if not (c_tur and c_kalem and c_tutar):
+            raise ValueError("Başlıklar bulunamadı. Gerekli: Tür, Kalem, Tutar")
+
+        df2 = df[[c_tur, c_kalem, c_tutar]].copy()
+        df2.columns = ["Tür","Kalem","Tutar"]
+        df2["Tür"]   = df2["Tür"].str.upper().str.strip().replace({"GIDER":"GİDER"})
+        df2["TutarN"] = df2["Tutar"].apply(_to_num)
+
+        giders = df2[df2["Tür"]=="GİDER"][["Kalem","TutarN"]].reset_index(drop=True)
+        gelirs = df2[df2["Tür"]=="GELİR"][["Kalem","TutarN"]].reset_index(drop=True)
+        return giders, gelirs
+
+    if mode_rep.startswith("Tek dosyada"):
+        up_all = st.file_uploader("Tek dosya yükle (CSV/XLSX)", type=["csv","xlsx"], key="rep_all")
+        df_gider = df_gelir = None
+        if up_all is not None:
+            try:
+                df = _read_any_table(up_all)
+                df_gider, df_gelir = _split_tables_from_one(df)
+                st.success(f"GİDER: {len(df_gider)} satır, GELİR: {len(df_gelir)} satır")
+            except Exception as e:
+                st.error(f"Okuma/ayırma hatası: {e}")
+                df_gider = df_gelir = None
+    else:
+        up_g = st.file_uploader("Giderler (CSV/XLSX)", type=["csv","xlsx"], key="rep_g")
+        up_l = st.file_uploader("Gelirler (CSV/XLSX)", type=["csv","xlsx"], key="rep_l")
+        df_gider = df_gelir = None
+        if up_g and up_l:
+            try:
+                dfg = _read_any_table(up_g); dfl = _read_any_table(up_l)
+                # başlık sezgisel: ilk iki metin kolondan 'Kalem', parasal ilk kolondan 'Tutar'
+                def canon(df0):
+                    # ilk metin benzeri kolon
+                    name_col = next((c for c in df0.columns if df0[c].astype(str).str.len().mean()>=2), df0.columns[0])
+                    # ilk para benzeri kolon
+                    val_col = next((c for c in df0.columns if df0[c].astype(str).str.contains(r"\d", regex=True).mean()>0.6), df0.columns[-1])
+                    out = pd.DataFrame({"Kalem": df0[name_col].astype(str), "TutarN": df0[val_col].apply(_to_num)})
+                    return out
+                    #
+                df_gider = canon(dfg); df_gelir = canon(dfl)
+                st.success(f"GİDER: {len(df_gider)} satır, GELİR: {len(df_gelir)} satır")
+            except Exception as e:
+                st.error(f"Okuma hatası: {e}")
+                df_gider = df_gelir = None
+
+    # Özet alanları
+    st.markdown("#### Alt Özet Alanları")
+    c1, c2 = st.columns(2)
+    with c1:
+        alacak_tahakkuk   = st.text_input("2025 EYLÜL AYI AİDAT ALACAKLARIMIZ / TAHAKKUK EDİLEN", "821.532,21")
+        tahsil_edilen     = st.text_input("2025 EYLÜL AYI TAHSİL EDİLEN AİDAT (GERÇEKLEŞEN)", "574.259,57")
+        kalan_alacak      = st.text_input("2025 EYLÜL AYI KALAN AİDAT ALACAKLARIMIZ (TAHSİL EDİLECEK)", "247.272,64")
+        son_tu_alacak     = st.text_input("2025 EYLÜL AYI SONU TU ALACAKLARIMIZ", "506.593,48")
+    with c2:
+        banka_kasa        = st.text_input("2025 EYLÜL AYI BANKA-KASA MEVCUDU", "409.965,72")
+        mevcut_alacak     = st.text_input("2025 EYLÜL AYI SONU MEVCUT ALACAK", "916.559,20")
+        mevcut_borclar    = st.text_input("2025 EYLÜL AYI SONU BORÇLARIMIZ", "469.059,87")
+
+    faaliyet = st.text_area("Faaliyet Notları (madde madde)", "1) ...\n2) ...\n3) ...")
+
+    btn = st.button("🧾 PDF Üret", use_container_width=True)
+
+    # ---- PDF ÇİZİMİ ----
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+
+    def _draw_table_pair(can, left_rows, right_rows, title="ATLAS VADİ SİTESİ 2025 EYLÜL AYI GELİR GİDER RAPORU"):
+        W, H = A4
+        can.setFont("NotoSans-Bold", 14)
+        can.drawCentredString(W/2, H-40, title)
+
+        # kolon kutuları
+        left_x, right_x = 20*mm, 110*mm
+        top_y = H-60
+        row_h = 12
+        colw_name = 70*mm; colw_val = 30*mm
+
+        def box(x, y, w, h):
+            can.rect(x, y-h, w, h, stroke=1, fill=0)
+
+        # başlıklar
+        can.setFont("NotoSans-Bold", 10)
+        can.drawString(left_x,  top_y+6, "GİDERLER")
+        can.drawString(right_x, top_y+6, "GELİRLER")
+
+        # satırlar
+        can.setFont("NotoSans-Regular", 9)
+
+        def draw_side(x0, rows):
+            y = top_y
+            for name, val in rows:
+                y -= row_h
+                box(x0, y, colw_name+colw_val, row_h)
+                can.drawString(x0+4, y+3, str(name)[:38])
+                s = f"{val:,.2f} TRY".replace(",", "X").replace(".", ",").replace("X",".")
+                tw = can.stringWidth(s, "NotoSans-Regular", 9)
+                can.drawString(x0+colw_name+colw_val-tw-4, y+3, s)
+            return y
+
+        yL = draw_side(left_x,  [(r["Kalem"], float(r["TutarN"])) for _, r in df_gider.iterrows()] if isinstance(df_gider, pd.DataFrame) else [])
+        yR = draw_side(right_x, [(r["Kalem"], float(r["TutarN"])) for _, r in df_gelir.iterrows()] if isinstance(df_gelir, pd.DataFrame) else [])
+
+        # toplam satırları (renkli şerit)
+        def sum_rows(df):
+            return float(df["TutarN"].sum()) if isinstance(df, pd.DataFrame) else 0.0
+
+        gider_toplam = sum_rows(df_gider)
+        gelir_toplam = sum_rows(df_gelir)
+        donem_fazla  = gelir_toplam - gider_toplam
+
+        # sağ tabloda “GELİR TOPLAMI” ve “DÖNEM GİDER FAZLASI”
+        y = min(yL, yR) - row_h
+        can.setFillColorRGB(1,1,0.6)  # sarımsı
+        can.rect(right_x, y-row_h,  colw_name+colw_val, row_h, stroke=0, fill=1)
+        can.setFillColor(colors.black)
+        can.setFont("NotoSans-Bold", 9)
+        can.drawString(right_x+4, y-row_h+3, "GELİR TOPLAMI")
+        s = f"{gelir_toplam:,.2f} TRY".replace(",", "X").replace(".", ",").replace("X",".")
+        tw = can.stringWidth(s, "NotoSans-Bold", 9)
+        can.drawString(right_x+colw_name+colw_val-tw-4, y-row_h+3, s)
+
+        y2 = y-2*row_h
+        can.setFillColorRGB(1,1,0.6)
+        can.rect(right_x, y2-row_h, colw_name+colw_val, row_h, stroke=0, fill=1)
+        can.setFillColor(colors.black)
+        can.drawString(right_x+4, y2-row_h+3, "DÖNEM GİDER FAZLASI")
+        s = f"{donem_fazla:,.2f} TRY".replace(",", "X").replace(".", ",").replace("X",".")
+        tw = can.stringWidth(s, "NotoSans-Bold", 9)
+        can.drawString(right_x+colw_name+colw_val-tw-4, y2-row_h+3, s)
+
+        return min(y2-2*row_h, yL-2*row_h, yR-2*row_h)
+
+    def _draw_bottom(can, y0):
+        W, H = A4
+        can.setFont("NotoSans-Bold", 9)
+        can.drawString(20*mm, y0, "ALACAKLARIMIZ")
+        can.setFont("NotoSans-Regular", 9)
+
+        def par(s): return _to_num(s)
+
+        lines = [
+            ("2025 EYLÜL AYI AİDAT  ALACAKLARIMIZ / TAHAKKUK EDİLEN", par(alacak_tahakkuk)),
+            ("2025 EYLÜL  AYI TAHSİL EDİLEN AİDAT  (GERÇEKLEŞEN)", par(tahsil_edilen)),
+            ("2025 EYLÜL  AYI KALAN AİDAT ALACAKLARIMIZ (TAHSİL EDİLECEK )", par(kalan_alacak)),
+            ("2025 EYLÜL  AYI SONU TU ALACAKLARIMIZ", par(son_tu_alacak)),
+            ("2025 EYLÜL  AYI BANKA-KASA MEVCUDU", par(banka_kasa)),
+            ("2025 EYLÜL  AYI SONU MEVCUT ALACAK", par(mevcut_alacak)),
+            ("2025 EYLÜL  AYI SONU BORÇLARIMIZ", par(mevcut_borclar)),
+        ]
+        x_name, x_val = 22*mm, 180*mm
+        y = y0-14
+        for name, val in lines:
+            can.drawString(x_name, y, name)
+            s = f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+            tw = can.stringWidth(s, "NotoSans-Regular", 9)
+            can.drawString(x_val-tw, y, s)
+            y -= 14
+
+        # faaliyet
+        y -= 8
+        can.setFont("NotoSans-Bold", 9)
+        can.drawString(20*mm, y, "2025 EYLÜL AYI FAALİYETLERİMİZ")
+        can.setFont("NotoSans-Regular", 9)
+        y -= 12
+        for ln in (faaliyet or "").splitlines():
+            can.drawString(20*mm, y, ln.strip())
+            y -= 12
+
+    if btn:
+        if df_gider is None or df_gelir is None:
+            st.error("Önce tabloları yükleyin.")
+            st.stop()
+
+        pdf_io = BytesIO()
+        can = canvas.Canvas(pdf_io, pagesize=A4)
+
+        # baş ve iki kolon
+        y_after = _draw_table_pair(can, df_gider, df_gelir)
+        # alt özet alanları
+        _draw_bottom(can, y_after)
+
+        can.showPage()
+        can.save()
+        pdf_bytes = pdf_io.getvalue()
+
+        st.success("PDF hazır.")
+        st.download_button("📥 Gelir-Gider Raporu.pdf", pdf_bytes, file_name="GelirGiderRaporu.pdf", mime="application/pdf")
 # ---------------- TAB GG: Gelir-Gider Dönüştürücü ----------------
 with tab_gg:
     st.subheader("📑 PDF’ten Gelir-Gider Tablosu Çıkar")
