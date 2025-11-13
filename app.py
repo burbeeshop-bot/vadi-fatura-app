@@ -1112,13 +1112,14 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB OCR: El Yazısı Endeks → Excel (EasyOCR) ----------------
+# ---------------- TAB OCR: El Yazısı Endeks → Excel ----------------
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
 
-    if not OCR_READY:
-        st.error("OCR modülü yüklü değil. Sunucuda `easyocr`, `torch`, `pdf2image`, `Pillow` kurulu olmalı.")
-        st.info(OCR_IMPORT_ERROR if 'OCR_IMPORT_ERROR' in globals() else "")
+    # OCR hazır mı?
+    if not HAS_OCR:
+        st.error("OCR modülü yüklü değil. Sunucuda `tesseract-ocr` ve Python için "
+                 "`pytesseract, pdf2image, Pillow` kurulu olmalı.")
         st.stop()
 
     st.markdown("""
@@ -1134,56 +1135,76 @@ with tab_ocr:
         key="ocr_files"
     )
 
+    lang = st.selectbox(
+        "Tesseract dili",
+        ["tur", "tur+eng"],
+        index=0,
+        help="Türkçe için `tur` genelde yeterli. Gerekirse `tur+eng` deneyebilirsin."
+    )
+
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
-           if go_ocr:
-            if not pdf_files:
-                st.warning("Lütfen en az bir PDF yükleyin.")
-                st.stop()
+    if ocr_go:
+        if not ocr_files:
+            st.warning("En az bir dosya yüklemelisin.")
+            st.stop()
 
-            all_dfs = []
-            reader = easyocr.Reader(['tr','en'])
+        all_dfs = []
 
-            for f in pdf_files:
+        for f in ocr_files:
+            bytes_data = f.read()
+
+            # PDF → resim listesi
+            if f.name.lower().endswith(".pdf"):
                 try:
-                    pages_images = convert_from_bytes(f.read(), dpi=250)
+                    pages_images = convert_from_bytes(bytes_data, dpi=300)
                 except Exception as e:
-                    st.error(f"{f.name} dönüştürülemedi: {e}")
+                    st.error(f"{f.name} PDF görüntüye çevrilemedi: {e}")
+                    continue
+            else:
+                # Doğrudan resim
+                try:
+                    img = Image.open(io.BytesIO(bytes_data))
+                    pages_images = [img]
+                except Exception as e:
+                    st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-                for page_idx, img in enumerate(pages_images, start=1):
-                    np_img = np.array(img)
+            # Her sayfayı OCR işle
+            for page_idx, img in enumerate(pages_images, start=1):
+                try:
+                    ocr_text = pytesseract.image_to_string(img, lang=lang)
+                except Exception as e:
+                    st.error(f"OCR çalışırken hata: {e}")
+                    continue
 
-                    # OCR
-                    text_result = reader.readtext(np_img, detail=0)
-                    ocr_text = "\n".join(text_result)
+                df_page = _parse_endeks_text_to_df(ocr_text)
 
-                    # 🔍 Ham OCR çıktısı göster
-                    with st.expander(f"OCR ham metin – {f.name} / sayfa {page_idx}"):
-                        st.code(ocr_text)
+                if df_page.empty:
+                    st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
+                else:
+                    df_page["KAYNAK_DOSYA"] = f.name
+                    df_page["SAYFA"] = page_idx
+                    all_dfs.append(df_page)
 
-                    # Parse et
-                    df_page = _parse_endeks_text_to_df(ocr_text)
-                    if df_page.empty:
-                        st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
-                    else:
-                        df_page["KAYNAK_DOSYA"] = f.name
-                        df_page["SAYFA"] = page_idx
-                        all_dfs.append(df_page)
+        if not all_dfs:
+            st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
+            st.stop()
 
-            if not all_dfs:
-                st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
-            else:
-                final_df = pd.concat(all_dfs, ignore_index=True)
-                st.success("OCR tamamlandı ve tablo oluşturuldu.")
-                st.dataframe(final_df, use_container_width=True)
+        df_all = pd.concat(all_dfs, ignore_index=True)
 
-                xlsx = final_df.to_excel(index=False, engine="openpyxl")
-                st.download_button(
-                    "📥 Endeks_Excel.xlsx",
-                    data=xlsx,
-                    file_name="Endeks_Excel.xlsx"
-                )
+        st.success(f"{len(df_all)} satır okundu.")
+        st.dataframe(df_all, use_container_width=True)
+
+        # Excel çıktısı
+        excel_bytes = export_excel_bytes(df_all, filename="Endeksler_OCR.xlsx")
+        st.download_button(
+            "📥 Endeksler_OCR.xlsx indir",
+            excel_bytes,
+            file_name="Endeksler_OCR.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
