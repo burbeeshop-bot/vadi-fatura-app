@@ -1136,71 +1136,54 @@ with tab_ocr:
 
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
-    if ocr_go:
-        if not ocr_files:
-            st.warning("En az bir dosya yüklemelisin.")
-            st.stop()
+           if go_ocr:
+            if not pdf_files:
+                st.warning("Lütfen en az bir PDF yükleyin.")
+                st.stop()
 
-        reader = easyocr.Reader(["en"], gpu=False)
+            all_dfs = []
+            reader = easyocr.Reader(['tr','en'])
 
-        all_dfs = []
-
-        for f in ocr_files:
-            bytes_data = f.read()
-            pages_images = []
-
-            if f.name.lower().endswith(".pdf"):
-                # PDF → image list
+            for f in pdf_files:
                 try:
-                    pages_images = convert_from_bytes(bytes_data, dpi=300)
+                    pages_images = convert_from_bytes(f.read(), dpi=250)
                 except Exception as e:
-                    st.error(f"{f.name} PDF görüntüye çevrilemedi: {e}")
+                    st.error(f"{f.name} dönüştürülemedi: {e}")
                     continue
+
+                for page_idx, img in enumerate(pages_images, start=1):
+                    np_img = np.array(img)
+
+                    # OCR
+                    text_result = reader.readtext(np_img, detail=0)
+                    ocr_text = "\n".join(text_result)
+
+                    # 🔍 Ham OCR çıktısı göster
+                    with st.expander(f"OCR ham metin – {f.name} / sayfa {page_idx}"):
+                        st.code(ocr_text)
+
+                    # Parse et
+                    df_page = _parse_endeks_text_to_df(ocr_text)
+                    if df_page.empty:
+                        st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
+                    else:
+                        df_page["KAYNAK_DOSYA"] = f.name
+                        df_page["SAYFA"] = page_idx
+                        all_dfs.append(df_page)
+
+            if not all_dfs:
+                st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
             else:
-                # doğrudan resim
-                try:
-                    img = Image.open(io.BytesIO(bytes_data))
-                    pages_images = [img]
-                except Exception as e:
-                    st.error(f"{f.name} görüntü olarak açılamadı: {e}")
-                    continue
+                final_df = pd.concat(all_dfs, ignore_index=True)
+                st.success("OCR tamamlandı ve tablo oluşturuldu.")
+                st.dataframe(final_df, use_container_width=True)
 
-           for page_idx, img in enumerate(pages_images, start=1):
-    np_img = np.array(img)
-    # OCR
-    text_result = reader.readtext(np_img, detail=0)
-    ocr_text = "\n".join(text_result)
-
-    # 🔍 Debug: ham OCR metnini göster
-    with st.expander(f"OCR ham metin – {f.name} / sayfa {page_idx}"):
-        st.code(ocr_text)
-
-    df_page = _parse_endeks_text_to_df(ocr_text)
-    if df_page.empty:
-        st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
-    else:
-        df_page["KAYNAK_DOSYA"] = f.name
-        df_page["SAYFA"] = page_idx
-        all_dfs.append(df_page)
-        if not all_dfs:
-            st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
-            st.stop()
-
-        df_all = pd.concat(all_dfs, ignore_index=True)
-
-        st.success(f"{len(df_all)} satır okundu.")
-        st.dataframe(df_all, use_container_width=True)
-
-        # Excel çıktısı
-        excel_bytes = export_excel_bytes(df_all, filename="Endeksler_OCR.xlsx")
-        st.download_button(
-            "📥 Endeksler_OCR.xlsx indir",
-            excel_bytes,
-            file_name="Endeksler_OCR.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-
+                xlsx = final_df.to_excel(index=False, engine="openpyxl")
+                st.download_button(
+                    "📥 Endeks_Excel.xlsx",
+                    data=xlsx,
+                    file_name="Endeks_Excel.xlsx"
+                )
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
