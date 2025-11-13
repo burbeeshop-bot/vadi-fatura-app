@@ -1114,21 +1114,16 @@ with tab_b:
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
 
+    # EASY OCR hazır mı?
+    if not OCR_READY:
+        st.error(f"OCR modülü yüklenemedi.\nHata: {OCR_IMPORT_ERROR}")
+        st.stop()
+
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
-    - Program Tesseract (**pytesseract**) ile satırları okuyup tek sayfalık **Excel** üretecek.
+    - Program **EasyOCR** ile satırları okuyup tek sayfalık **Excel** üretecek.
     - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
     """)
-
-    # OCR kütüphanesi hazır mı?
-    if not OCR_READY:
-        st.error(
-            "OCR modülü yüklenemedi.\n"
-            "Sunucuda `tesseract-ocr` ve Python tarafında da `pytesseract`, `pdf2image`, `Pillow` "
-            "kütüphanelerinin kurulu olması gerekiyor.\n\n"
-            f"Teknik hata: {OCR_IMPORT_ERROR}"
-        )
-        st.stop()
 
     ocr_files = st.file_uploader(
         "Sayfa(lar)ı yükle (JPG/PNG/PDF)",
@@ -1140,9 +1135,16 @@ with tab_ocr:
     lang = st.selectbox(
         "OCR dili",
         ["tur", "tur+eng"],
-        index=0,
-        help="Tesseract dil kodu: sadece Türkçe için 'tur', Türkçe+İngilizce için 'tur+eng'."
+        index=0
     )
+
+    # EasyOCR motoru
+    try:
+        easyocr_langs = ["tr"] if lang == "tur" else ["tr", "en"]
+        reader = easyocr.Reader(easyocr_langs, gpu=False)
+    except Exception as e:
+        st.error(f"OCR motoru başlatılamadı: {e}")
+        st.stop()
 
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
@@ -1175,8 +1177,10 @@ with tab_ocr:
             # OCR işle
             for page_idx, img in enumerate(pages_images, start=1):
                 try:
-                    # Tesseract ile metin okuma
-                    ocr_text = pytesseract.image_to_string(img, lang=lang)
+                    # EasyOCR img'i numpy array olarak istiyor
+                    img_np = np.array(img)
+                    results = reader.readtext(img_np, detail=0)
+                    ocr_text = "\n".join(results)
                 except Exception as e:
                     st.error(f"OCR çalışırken hata: {e}")
                     continue
