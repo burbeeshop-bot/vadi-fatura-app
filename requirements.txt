@@ -12,3 +12,6 @@ google-auth
 google-auth-oauthlib
 openpyxl
 requests
+pytesseract==0.3.10
+pdf2image==1.17.0
+Pillow==10.4.0
