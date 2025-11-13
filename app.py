@@ -91,20 +91,19 @@ try:
 except Exception:
     HAS_DOCX = False
 
-# ---------------- OCR (EasyOCR) ----------------
+# ---------------- OCR (Tesseract) ----------------
 OCR_READY = False
 OCR_IMPORT_ERROR = ""
 
 try:
     from PIL import Image
     from pdf2image import convert_from_bytes
-    import numpy as np
-    import easyocr
+    import pytesseract
     OCR_READY = True
 except Exception as e:
     OCR_READY = False
     OCR_IMPORT_ERROR = str(e)
-    
+
 # -----------------------------------------------------------------------------
 # Streamlit Page
 # -----------------------------------------------------------------------------
@@ -176,7 +175,7 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
         if not line:
             continue
 
-        # Önce eski regex ile dene (tutan satırlar için)
+        # Önce regex ile dene
         m = re.search(
             r'\b([A-Z]\d\s*D\d{1,2})\s+'   # C1 D1
             r'(\d[\d\.,]*)\s+'             # ISI SAYACI
@@ -195,20 +194,16 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
         else:
             # Regex tutmadıysa daha gevşek bir yöntem deneyelim
             tokens = line.split()
-            # Çok kısa satır → geç
             if len(tokens) < 6:
                 continue
 
             # C1 D1 ... şeklini yakalamaya çalış
-            # Örn: ["C1","D1","12564154","62,557","308,7","314,5"]
             t0 = tokens[0].upper()
             t1 = tokens[1].upper()
 
             if not re.match(r"^[A-Z]\d$", t0):
-                # İlk token blok değilse atla
                 continue
             if not t1.startswith("D"):
-                # İkinci token D ile başlamıyorsa (D1, D01 vb.) atla
                 continue
 
             daire_raw = f"{t0} {t1}"
@@ -216,10 +211,8 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
             # Kalan sayıları al
             nums = tokens[2:]
             if len(nums) < 4:
-                # En az 4 sayı bekliyoruz
                 continue
 
-            # Basit varsayım: [ısı sayacı, ısınma, sıcak su, soğuk su]
             isi_raw   = nums[0]
             isin_raw  = nums[1]
             sicak_raw = nums[2]
@@ -807,7 +800,6 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # Temizlik
     def _pad3_for_merge(x) -> str:
-        digits = "".join(ch for ch in str(x or "") if x is not None and str(x).isdigit() or str(x).replace(" ", ""))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
 
@@ -1120,18 +1112,14 @@ with tab_b:
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
 
-    # OCR hazır mı?
-    if not HAS_OCR:
-        st.error(
-            "OCR modülü yüklü değil.\n"
-            "Sunucuda `tesseract-ocr` ve Python için `pytesseract, pdf2image, Pillow` kurulu olmalı.\n\n"
-            f"İç hata: {OCR_IMPORT_ERROR if 'OCR_IMPORT_ERROR' in globals() else ''}"
-        )
+    # Tesseract OCR hazır mı?
+    if not OCR_READY:
+        st.error(f"OCR modülü yüklenemedi.\nHata: {OCR_IMPORT_ERROR}")
         st.stop()
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
-    - Program OCR (Tesseract) ile satırları okuyup tek sayfalık **Excel** üretecek.
+    - Program Tesseract (pytesseract) ile satırları okuyup tek sayfalık **Excel** üretecek.
     - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
     """)
 
@@ -1143,10 +1131,9 @@ with tab_ocr:
     )
 
     lang = st.selectbox(
-        "Tesseract dili",
+        "OCR dili (Tesseract dil kodu)",
         ["tur", "tur+eng"],
-        index=0,
-        help="Türkçe için `tur` genelde yeterli. Gerekirse `tur+eng` deneyebilirsin."
+        index=0
     )
 
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
@@ -1177,9 +1164,10 @@ with tab_ocr:
                     st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-            # Her sayfayı OCR işle
+            # OCR işle
             for page_idx, img in enumerate(pages_images, start=1):
                 try:
+                    # Tesseract ile metin okuma
                     ocr_text = pytesseract.image_to_string(img, lang=lang)
                 except Exception as e:
                     st.error(f"OCR çalışırken hata: {e}")
