@@ -1181,6 +1181,9 @@ with tab_ocr:
                     img_np = np.array(img)
                     results = reader.readtext(img_np, detail=0)
                     ocr_text = "\n".join(results)
+
+                # OCR METNİNİ EKRANA YAZDIR
+                    st.text_area(f"OCR çıktısı ({f.name} - sayfa {page_idx})", ocr_text, height=200)
                 except Exception as e:
                     st.error(f"OCR çalışırken hata: {e}")
                     continue
