@@ -9,3 +9,10 @@ google-api-python-client==2.149.0
 google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 pdfplumber==0.11.4
+
+# --- OCR için eklenenler ---
+easyocr==1.7.1
+Pillow==10.4.0
+numpy==1.26.4
+torch==2.2.2
+torchvision==0.17.2
