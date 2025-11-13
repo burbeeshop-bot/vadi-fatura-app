@@ -1122,23 +1122,20 @@ with tab_ocr:
                     st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-           for page_idx, img in enumerate(pages_images, start=1):
-    np_img = np.array(img)
-    # OCR
-    text_result = reader.readtext(np_img, detail=0)
-    ocr_text = "\n".join(text_result)
+            for page_idx, img in enumerate(pages_images, start=1):
+                np_img = np.array(img)
+                # OCR
+                text_result = reader.readtext(np_img, detail=0)
+                ocr_text = "\n".join(text_result)
 
-    # 🔍 Debug: ham OCR metnini göster
-    with st.expander(f"OCR ham metin – {f.name} / sayfa {page_idx}"):
-        st.code(ocr_text)
+                df_page = _parse_endeks_text_to_df(ocr_text)
+                if df_page.empty:
+                    st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
+                else:
+                    df_page["KAYNAK_DOSYA"] = f.name
+                    df_page["SAYFA"] = page_idx
+                    all_dfs.append(df_page)
 
-    df_page = _parse_endeks_text_to_df(ocr_text)
-    if df_page.empty:
-        st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
-    else:
-        df_page["KAYNAK_DOSYA"] = f.name
-        df_page["SAYFA"] = page_idx
-        all_dfs.append(df_page)
         if not all_dfs:
             st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
             st.stop()
