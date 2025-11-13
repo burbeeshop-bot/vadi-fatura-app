@@ -1121,7 +1121,6 @@ with tab_ocr:
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
-    - Program Tesseract (pytesseract) ile satırları okuyup tek sayfalık **Excel** üretecek.
     - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
     """)
 
@@ -1166,24 +1165,25 @@ with tab_ocr:
                     st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-            # OCR işle
-            for page_idx, img in enumerate(pages_images, start=1):
-                try:
-                    # Tesseract ile metin okuma
-                    ocr_text = pytesseract.image_to_string(img, lang=lang)
-                except Exception as e:
-                    st.error(f"OCR çalışırken hata: {e}")
-                    continue
+                    # OCR işle
+        for page_idx, img in enumerate(pages_images, start=1):
+            try:
+                # EasyOCR ile metin okuma
+                img_np = np.array(img)              # Pillow -> numpy
+                results = reader.readtext(img_np, detail=0)
+                ocr_text = "\n".join(results)
+            except Exception as e:
+                st.error(f"OCR çalışırken hata: {e}")
+                continue
 
-                df_page = _parse_endeks_text_to_df(ocr_text)
+            df_page = _parse_endeks_text_to_df(ocr_text)
 
-                if df_page.empty:
-                    st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
-                else:
-                    df_page["KAYNAK_DOSYA"] = f.name
-                    df_page["SAYFA"] = page_idx
-                    all_dfs.append(df_page)
-
+            if df_page.empty:
+                st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
+            else:
+                df_page["KAYNAK_DOSYA"] = f.name
+                df_page["SAYFA"] = page_idx
+                all_dfs.append(df_page)
         if not all_dfs:
             st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
             st.stop()
