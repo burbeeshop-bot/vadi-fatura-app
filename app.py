@@ -1735,4 +1735,62 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
+        # ---------------- TAB OCR: El Yazısı Su & Isınma Endeksleri → Excel ----------------
+with st.tab("📷 Endeks OCR → Excel"):
+
+    st.header("📷 El Yazısı Su & Isınma Endeksleri → Excel")
+
+    # OCR kütüphaneleri hazır mı?
+    try:
+        import easyocr
+        from pdf2image import convert_from_bytes
+        import numpy as np
+        OCR_READY = True
+    except Exception as e:
+        OCR_READY = False
+        st.error("OCR modülü yüklü değil. Sunucuda easyocr, torch, pdf2image, Pillow kurulu olmalı.")
+        st.info(str(e))
+
+    if not OCR_READY:
+        st.stop()
+
+    pdf_file_ocr = st.file_uploader("🧾 El yazısı ENDÜKS PDF yükleyin", type=["pdf"])
+
+    if pdf_file_ocr:
+        if st.button("🚀 OCR Çalıştır ve Excel Oluştur"):
+            with st.spinner("OCR çalışıyor... lütfen bekleyin"):
+
+                # 1) PDF'i görüntüye çevir
+                pages = convert_from_bytes(pdf_file_ocr.read(), dpi=300)
+
+                reader = easyocr.Reader(["en"], gpu=False)
+
+                results = []
+
+                for idx, img in enumerate(pages, start=1):
+                    np_img = np.array(img)
+
+                    # OCR oku
+                    text_result = reader.readtext(np_img, detail=0)
+
+                    # tek string olarak birleştir
+                    joined = "\n".join(text_result)
+
+                    results.append({"Sayfa": idx, "Metin": joined})
+
+                df_out = pd.DataFrame(results)
+
+                st.subheader("📋 OCR Çıktısı (Ham Metin)")
+                st.dataframe(df_out, use_container_width=True)
+
+                # Excel olarak indir
+                from io import BytesIO
+                bio = BytesIO()
+                df_out.to_excel(bio, index=False)
+                st.download_button(
+                    "📥 OCR_Çıktısı.xlsx",
+                    bio.getvalue(),
+                    file_name="OCR_Endeks.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
         
