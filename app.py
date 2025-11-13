@@ -1115,15 +1115,14 @@ with tab_b:
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
 
-    # OCR hazır mı?
-    if not HAS_OCR:
-        st.error("OCR modülü yüklü değil. Sunucuda `tesseract-ocr` ve Python için "
-                 "`pytesseract, pdf2image, Pillow` kurulu olmalı.")
+    # EASY OCR hazır mı?
+    if not OCR_READY:
+        st.error(f"OCR modülü yüklenemedi.\nHata: {OCR_IMPORT_ERROR}")
         st.stop()
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
-    - Program OCR ile satırları okuyup tek sayfalık **Excel** üretecek.
+    - Program EasyOCR ile satırları okuyup tek sayfalık **Excel** üretecek.
     - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
     """)
 
@@ -1135,11 +1134,19 @@ with tab_ocr:
     )
 
     lang = st.selectbox(
-        "Tesseract dili",
+        "OCR dili",
         ["tur", "tur+eng"],
-        index=0,
-        help="Türkçe için `tur` genelde yeterli. Gerekirse `tur+eng` deneyebilirsin."
+        index=0
     )
+
+    # OCR engine
+    reader = None
+    try:
+        langs = lang.split("+")
+        reader = easyocr.Reader(langs, gpu=False)
+    except Exception as e:
+        st.error(f"OCR motoru başlatılamadı: {e}")
+        st.stop()
 
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
@@ -1169,10 +1176,15 @@ with tab_ocr:
                     st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-            # Her sayfayı OCR işle
+            # OCR işle
             for page_idx, img in enumerate(pages_images, start=1):
+
+                # EasyOCR formatına çevir
+                img_np = np.array(img)
+
                 try:
-                    ocr_text = pytesseract.image_to_string(img, lang=lang)
+                    results = reader.readtext(img_np, detail=0)
+                    ocr_text = "\n".join(results)
                 except Exception as e:
                     st.error(f"OCR çalışırken hata: {e}")
                     continue
@@ -1204,7 +1216,6 @@ with tab_ocr:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
