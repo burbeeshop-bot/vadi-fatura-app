@@ -803,6 +803,7 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # Temizlik
     def _pad3_for_merge(x) -> str:
+        digits = "".join(ch for ch in str(x or "") if x is not None and str(x).isdigit() or str(x).replace(" ", ""))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
 
@@ -1115,14 +1116,18 @@ with tab_b:
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
 
-    # EASY OCR hazır mı?
-    if not OCR_READY:
-        st.error(f"OCR modülü yüklenemedi.\nHata: {OCR_IMPORT_ERROR}")
+    # OCR hazır mı?
+    if not HAS_OCR:
+        st.error(
+            "OCR modülü yüklü değil.\n"
+            "Sunucuda `tesseract-ocr` ve Python için `pytesseract, pdf2image, Pillow` kurulu olmalı.\n\n"
+            f"İç hata: {OCR_IMPORT_ERROR if 'OCR_IMPORT_ERROR' in globals() else ''}"
+        )
         st.stop()
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
-    - Program EasyOCR ile satırları okuyup tek sayfalık **Excel** üretecek.
+    - Program OCR (Tesseract) ile satırları okuyup tek sayfalık **Excel** üretecek.
     - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
     """)
 
@@ -1134,19 +1139,11 @@ with tab_ocr:
     )
 
     lang = st.selectbox(
-        "OCR dili",
+        "Tesseract dili",
         ["tur", "tur+eng"],
-        index=0
+        index=0,
+        help="Türkçe için `tur` genelde yeterli. Gerekirse `tur+eng` deneyebilirsin."
     )
-
-    # OCR engine
-    reader = None
-    try:
-        langs = lang.split("+")
-        reader = easyocr.Reader(langs, gpu=False)
-    except Exception as e:
-        st.error(f"OCR motoru başlatılamadı: {e}")
-        st.stop()
 
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
@@ -1176,15 +1173,10 @@ with tab_ocr:
                     st.error(f"{f.name} görüntü olarak açılamadı: {e}")
                     continue
 
-            # OCR işle
+            # Her sayfayı OCR işle
             for page_idx, img in enumerate(pages_images, start=1):
-
-                # EasyOCR formatına çevir
-                img_np = np.array(img)
-
                 try:
-                    results = reader.readtext(img_np, detail=0)
-                    ocr_text = "\n".join(results)
+                    ocr_text = pytesseract.image_to_string(img, lang=lang)
                 except Exception as e:
                     st.error(f"OCR çalışırken hata: {e}")
                     continue
@@ -1216,6 +1208,7 @@ with tab_ocr:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
