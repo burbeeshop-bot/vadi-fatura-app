@@ -83,6 +83,15 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
+# OCR (el yazısı endeksleri okumak için)
+try:
+    from PIL import Image
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    HAS_OCR = True
+except Exception:
+    HAS_OCR = False
+
 # (opsiyonel) .docx
 try:
     import docx  # python-docx
@@ -119,7 +128,55 @@ def _to_float_tr(s: str) -> float:
         return float(s)
     except:
         return 0.0
+def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
+    """
+    El yazılı 'su ve ısınma endeksleri' sayfasından OCR ile çıkan metni satır satır tarar.
+    Beklenen kolonlar: BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU
+    """
+    rows = []
+    # satır bazlı çalışıyoruz
+    for raw_line in text.splitlines():
+        line = raw_line.replace("\t", " ").strip()
+        if not line:
+            continue
 
+        # Örnek beklenen pattern:
+        # C1 D1   12564154   62.557   308.7   314.5
+        m = re.search(
+            r'\b([A-Z]\d\s*D\d{1,2})\s+'
+            r'(\d[\d\.,]*)\s+'        # ISI SAYACI
+            r'(\d[\d\.,]*)\s+'        # ISINMA
+            r'(\d[\d\.,]*)\s+'        # SICAK
+            r'(\d[\d\.,]*)\b',        # SOĞUK
+            line
+        )
+        if not m:
+            continue
+
+        daire = m.group(1).upper().replace(" ", "")
+        # C1D1 → C1 D1
+        if len(daire) == 3 and daire[2].isdigit():
+            daire = daire[:2] + " D" + daire[2:]
+
+        def clean_meter(s: str) -> int:
+            digits = "".join(ch for ch in s if ch.isdigit())
+            return int(digits) if digits else 0
+
+        isi_sayaci = clean_meter(m.group(2))
+        isinma     = _to_float_tr(m.group(3))
+        sicak_su   = _to_float_tr(m.group(4))
+        soguk_su   = _to_float_tr(m.group(5))
+
+        rows.append({
+            "BÖLÜM/DAİRE": daire,
+            "ISI SAYACI": isi_sayaci,
+            "ISINMA": isinma,
+            "SICAK SU": sicak_su,
+            "SOĞUK SU": soguk_su,
+        })
+
+    return pd.DataFrame(rows)
+    
 def _normalize_tr(t: str) -> str:
     """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
@@ -841,9 +898,10 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_w, tab_r = st.tabs([
+tab_a, tab_b, tab_ocr, tab_c, tab_w, tab_r = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
+    "📷 Endeks OCR → Excel",
     "📤 WhatsApp Gönderim Hazırlığı",
     "📲 WhatsApp Gönder (Cloud API)",
     "📑 Gelir-Gider Raporu (PDF)"
@@ -1042,6 +1100,94 @@ with tab_b:
             file_name="Apsiyon_Doldurulmus.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_aps"
+        )
+
+# ---------------- TAB OCR: El Yazısı Endeks → Excel ----------------
+with tab_ocr:
+    st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
+
+    if not HAS_OCR:
+        st.error("OCR modülü yüklü değil. Sunucuda `tesseract-ocr` ve Python için "
+                 "`pytesseract, pdf2image, Pillow` kurulu olmalı.")
+        st.stop()
+
+    st.markdown("""
+    - El yazılı **'07.11.2025 su ve ısınma endeksleri'** sayfasının **fotoğrafını veya PDF'ini** yükle.
+    - Program OCR ile satırları okuyup tek sayfalık **Excel** üretecek.
+    - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
+    """)
+
+    up_files = st.file_uploader(
+        "Sayfa(lar)ı yükle (JPG/PNG/PDF)",
+        type=["jpg", "jpeg", "png", "pdf"],
+        accept_multiple_files=True,
+        key="ocr_files"
+    )
+
+    lang = st.selectbox(
+        "Tesseract dili",
+        ["tur", "tur+eng"],
+        index=0,
+        help="`tur` genelde yeterli. Bazı sayılarda sorun olursa `tur+eng` deneyebilirsin."
+    )
+
+    ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
+
+    if ocr_go:
+        if not up_files:
+            st.warning("En az bir dosya yüklemelisin.")
+            st.stop()
+
+        all_dfs = []
+
+        for f in up_files:
+            bytes_data = f.read()
+            pages_images = []
+
+            if f.name.lower().endswith(".pdf"):
+                # PDF → image list
+                try:
+                    pages_images = convert_from_bytes(bytes_data, dpi=300)
+                except Exception as e:
+                    st.error(f"{f.name} PDF görüntüye çevrilemedi: {e}")
+                    continue
+            else:
+                # doğrudan resim
+                try:
+                    img = Image.open(io.BytesIO(bytes_data))
+                    pages_images = [img]
+                except Exception as e:
+                    st.error(f"{f.name} görüntü olarak açılamadı: {e}")
+                    continue
+
+            for page_idx, img in enumerate(pages_images, start=1):
+                # OCR
+                ocr_text = pytesseract.image_to_string(img, lang=lang)
+                df_page = _parse_endeks_text_to_df(ocr_text)
+                if df_page.empty:
+                    st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
+                else:
+                    df_page["KAYNAK_DOSYA"] = f.name
+                    df_page["SAYFA"] = page_idx
+                    all_dfs.append(df_page)
+
+        if not all_dfs:
+            st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
+            st.stop()
+
+        df_all = pd.concat(all_dfs, ignore_index=True)
+
+        st.success(f"{len(df_all)} satır okundu.")
+        st.dataframe(df_all, use_container_width=True)
+
+        # Excel çıktısı
+        excel_bytes = export_excel_bytes(df_all, filename="Endeksler_OCR.xlsx")
+        st.download_button(
+            "📥 Endeksler_OCR.xlsx indir",
+            excel_bytes,
+            file_name="Endeksler_OCR.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
