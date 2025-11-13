@@ -91,15 +91,14 @@ try:
 except Exception:
     HAS_DOCX = False
 
-# ---------------- OCR (EasyOCR) ----------------
+# ---------------- OCR (Tesseract) ----------------
 try:
     from PIL import Image
     from pdf2image import convert_from_bytes
-    import numpy as np
-    import easyocr
-    OCR_READY = True
+    import pytesseract
+    HAS_OCR = True
 except Exception as e:
-    OCR_READY = False
+    HAS_OCR = False
     OCR_IMPORT_ERROR = str(e)
 
 # -----------------------------------------------------------------------------
@@ -798,7 +797,7 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     for need in ["Blok","Daire No","Telefon"]:
         if need not in df2.columns:
             cols_map_debug = {c: _norm_rehber(c) for c in df.columns}
-            st.error(f"Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
+            st.error("Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
             st.write("Algılanan kolonlar (normalize):", cols_map_debug)
             raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
@@ -1205,6 +1204,7 @@ with tab_ocr:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
+
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
