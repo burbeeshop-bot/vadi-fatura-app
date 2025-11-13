@@ -1,5 +1,5 @@
 # app.py
-# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
+# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) & Endeks OCR ===
 import io, os, re, zipfile, unicodedata, json, uuid
 from typing import List, Dict, Tuple, Optional
 
@@ -14,6 +14,8 @@ try:
     _GDRIVE_OK = True
 except Exception:
     _GDRIVE_OK = False
+
+import json
 
 @st.cache_resource(show_spinner=False)
 def get_drive_service_from_secrets():
@@ -82,18 +84,23 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# OCR (EasyOCR)
-from PIL import Image
-from pdf2image import convert_from_bytes
-import numpy as np
-import easyocr
-
 # (opsiyonel) .docx
 try:
     import docx  # python-docx
     HAS_DOCX = True
 except Exception:
     HAS_DOCX = False
+
+# ---------------- OCR (EasyOCR) ----------------
+try:
+    from PIL import Image
+    from pdf2image import convert_from_bytes
+    import numpy as np
+    import easyocr
+    OCR_READY = True
+except Exception as e:
+    OCR_READY = False
+    OCR_IMPORT_ERROR = str(e)
 
 # -----------------------------------------------------------------------------
 # Streamlit Page
@@ -141,10 +148,19 @@ def _normalize_tr(t: str) -> str:
     t = re.sub(r"[ \t]+", " ", t)
     return t
 
+def _norm_colname(s: str) -> str:
+    return (str(s).strip().lower()
+            .replace("\n"," ").replace("\r"," ")
+            .replace(".","").replace("_"," ").replace("-"," "))
+
+# -----------------------------------------------------------------------------
+# OCR'dan gelen metni satır satır parse eden fonksiyon
+# -----------------------------------------------------------------------------
 def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
     """
     El yazılı 'su ve ısınma endeksleri' sayfasından OCR ile çıkan metni satır satır tarar.
     Beklenen kolonlar: BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU
+    Örnek satır: C1 D1   12564154   62.557   308.7   314.5
     """
     rows = []
     for raw_line in text.splitlines():
@@ -152,7 +168,6 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
         if not line:
             continue
 
-        # Örnek satır: C1 D1   12564154   62.557   308.7   314.5
         m = re.search(
             r'\b([A-Z]\d\s*D\d{1,2})\s+'   # C1 D1
             r'(\d[\d\.,]*)\s+'             # ISI SAYACI
@@ -185,11 +200,6 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
-
-def _norm_colname(s: str) -> str:
-    return (str(s).strip().lower()
-            .replace("\n"," ").replace("\r"," ")
-            .replace(".","").replace("_"," ").replace("-"," "))
 
 # -----------------------------------------------------------------------------
 # Alt Yazı (wrap & overlay)
@@ -744,15 +754,13 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Zorunlu kolonlar
     for need in ["Blok","Daire No","Telefon"]:
         if need not in df2.columns:
-            # Basit hata gösterimi için aynı uyarı metnini kullanalım
             cols_map_debug = {c: _norm_rehber(c) for c in df.columns}
-            st.error("Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
+            st.error(f"Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
             st.write("Algılanan kolonlar (normalize):", cols_map_debug)
             raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
     # Temizlik
     def _pad3_for_merge(x) -> str:
-        digits = "".join(ch for ch in str(x or "") if str(x))
         digits = "".join(ch for ch in str(x or "") if ch.isdigit())
         return digits.zfill(3) if digits else ""
 
@@ -774,6 +782,7 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     df2["DaireID"] = df2["Blok"] + "-" + df2["Daire No"]
 
     return df2[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
+
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """
@@ -820,9 +829,17 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Google Drive sabitleri
+# Google Drive — Servis Hesabı ile klasörden PDF listeleme + tekil link üretme
 # -----------------------------------------------------------------------------
 DEFAULT_DRIVE_FOLDER_ID = "1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"  # senin verdiğin klasör
+
+def _drive_available() -> bool:
+    try:
+        import googleapiclient.discovery  # noqa
+        from google.oauth2 import service_account  # noqa
+        return True
+    except Exception:
+        return False
 
 def extract_daire_from_filename(name: str) -> Optional[str]:
     """
@@ -843,7 +860,7 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
     return f"{blok}-{dno}"
 
 # -----------------------------------------------------------------------------
-# UI — 6 Sekme
+# UI — Sekmeler
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
@@ -941,7 +958,7 @@ with tab_a:
             st.warning("Lütfen önce bir PDF yükleyin.")
             st.stop()
 
-        src = pdf_file.getvalue()
+        src = pdf_file.read()
 
         if mode == "Sadece sayfalara böl":
             pages = split_pdf(src)
@@ -1052,9 +1069,14 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB OCR: El Yazısı Su & Isınma Endeksleri → Excel (EasyOCR) ----------------
+# ---------------- TAB OCR: El Yazısı Endeks → Excel (EasyOCR) ----------------
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
+
+    if not OCR_READY:
+        st.error("OCR modülü yüklü değil. Sunucuda `easyocr`, `torch`, `pdf2image`, `Pillow` kurulu olmalı.")
+        st.info(OCR_IMPORT_ERROR if 'OCR_IMPORT_ERROR' in globals() else "")
+        st.stop()
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
@@ -1077,7 +1099,8 @@ with tab_ocr:
             st.stop()
 
         reader = easyocr.Reader(["en"], gpu=False)
-        all_rows = []
+
+        all_dfs = []
 
         for f in ocr_files:
             bytes_data = f.read()
@@ -1101,8 +1124,9 @@ with tab_ocr:
 
             for page_idx, img in enumerate(pages_images, start=1):
                 np_img = np.array(img)
-                text_lines = reader.readtext(np_img, detail=0)
-                ocr_text = "\n".join(text_lines)
+                # OCR
+                text_result = reader.readtext(np_img, detail=0)
+                ocr_text = "\n".join(text_result)
 
                 df_page = _parse_endeks_text_to_df(ocr_text)
                 if df_page.empty:
@@ -1110,13 +1134,13 @@ with tab_ocr:
                 else:
                     df_page["KAYNAK_DOSYA"] = f.name
                     df_page["SAYFA"] = page_idx
-                    all_rows.append(df_page)
+                    all_dfs.append(df_page)
 
-        if not all_rows:
+        if not all_dfs:
             st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
             st.stop()
 
-        df_all = pd.concat(all_rows, ignore_index=True)
+        df_all = pd.concat(all_dfs, ignore_index=True)
 
         st.success(f"{len(df_all)} satır okundu.")
         st.dataframe(df_all, use_container_width=True)
@@ -1239,7 +1263,6 @@ with tab_c:
                 help="Klasör ID: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
             )
 
-            # Rehber yükleme (Apsiyon ham dosyası)
             rehber_up2 = st.file_uploader(
                 "Rehber (XLSX/CSV) — Apsiyon ham dosya",
                 type=["xlsx","csv"], key="wa_rehber2"
@@ -1278,8 +1301,8 @@ with tab_c:
 
                 # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
                 pdf_rows = []
-                for f in gfiles:
-                    base = f.get("name","")
+                for fmeta in gfiles:
+                    base = fmeta.get("name","")
                     m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
@@ -1289,7 +1312,7 @@ with tab_c:
                             daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
                         except:
                             daire_id = f"{m.group(1).upper()}-{m.group(2)}"
-                    pdf_rows.append({"file_name": base, "DaireID": daire_id, "file_id": f["id"]})
+                    pdf_rows.append({"file_name": base, "DaireID": daire_id, "file_id": fmeta["id"]})
                 pdf_df = pd.DataFrame(pdf_rows)
 
                 # 4) Rehberi oku
@@ -1305,7 +1328,7 @@ with tab_c:
                     how="left"
                 )
 
-                # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
+                # 6) Dosyaları paylaşıma aç + link üret
                 link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
 
                 st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
@@ -1405,7 +1428,6 @@ with tab_w:
 
     def _ok_number(s: str) -> str:
         s = str(s or "").strip()
-        # "+90..." formatı bekliyoruz; yoksa basit normalize
         s = s.replace(" ", "")
         if s.startswith("05") and len(s) == 11:
             return "+90" + s[1:]
@@ -1420,7 +1442,6 @@ with tab_w:
         headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
         components = []
-        # BODY vars
         components.append({
             "type": "body",
             "parameters": [
@@ -1429,7 +1450,6 @@ with tab_w:
                 {"type": "text", "text": file_url or ""},
             ]
         })
-        # HEADER document varsa (şablonunuzda HEADER: DOCUMENT tanımlı olmalı)
         if header_doc and file_url:
             components.insert(0, {
                 "type": "header",
@@ -1540,6 +1560,6 @@ with tab_w:
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
 
-# ---------------- TAB R: Gelir-Gider Raporu (PDF) ----------------
+# ---------------- TAB R: Gelir-Gider Raporu (şimdilik boş placeholder) ----------------
 with tab_r:
-    st.markdown("Buraya daha sonra gelir-gider raporu PDF üretimi gelecek. Şu an placeholder.")
+    st.info("Gelir-Gider Raporu (PDF) modülü daha sonra eklenecek.")
