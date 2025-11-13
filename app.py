@@ -162,87 +162,123 @@ def _norm_colname(s: str) -> str:
 # -----------------------------------------------------------------------------
 def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
     """
-    El yazılı 'su ve ısınma endeksleri' sayfasından OCR ile çıkan metni satır satır tarar.
-    Beklenen kolonlar: BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU
+    El yazılı endeks formlarından gelen OCR çıktısını satır satır tarar.
+    Beklenen yapı (örnek):
 
-    Basit varsayım:
-    - Satır yapısı kabaca:  C1 D1  12564154  62,557  308,7  314,5
-      yani: [daire_blok] [Dxx] [ısı_sayacı] [ısınma] [sıcak] [soğuk]
-    - Aralarda fazladan boşluk / küçük OCR hataları olabilir.
+        E1 D1
+        12564025
+        9282
+        3060
+        8895
+        E1 D2
+        12564028
+        48,826
+        402
+        496,2
+        ...
+
+    Yani:
+      - Bir daire başlığı: 'E1 D1', 'E2 D7' vb.
+      - Ardından 3–4 satır sayısal değer: ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU
     """
-    rows = []
 
-    for raw_line in text.splitlines():
-        line = raw_line.replace("\t", " ").strip()
-        if not line:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    def _parse_daire_line(line: str) -> Optional[str]:
+        """
+        'E1 D1', 'E2 D10', 'El D5' gibi satırlardan BÖLÜM/DAİRE değeri üretir.
+        """
+        s = line.upper()
+        s = s.replace("İ", "I").replace("  ", " ")
+
+        # 'EL D5' gibi: ikinci karakter rakam değilse 1 yapıyoruz
+        if len(s) >= 2 and s[0].isalpha() and not s[1].isdigit():
+            s = s[0] + "1" + s[2:]
+
+        # E1 D1 formatı
+        m = re.match(r"^([A-Z]\d)\s+D(\d{1,2})$", s)
+        if not m:
+            return None
+
+        blok = m.group(1)
+        try:
+            dno = int(m.group(2))
+            dno_str = f"{dno:03d}"
+        except:
+            dno_str = m.group(2).zfill(3)
+
+        return f"{blok} D{dno_str}"
+
+    def _extract_number_str(line: str) -> Optional[str]:
+        """
+        Rakam satırlarını yakalar.
+        Örn:
+         '56 166' → '56,166'
+         '742 1'  → '742,1'
+         '48,826' → '48,826'
+         '{Ne_L984L' → '984'
+        """
+        cleaned = re.sub(r"[^0-9\.,\s]", "", line)
+        if not re.search(r"\d", cleaned):
+            return None
+
+        # '56 166' gibi boşluklu ama ondalık yoksa
+        if ("," not in cleaned) and ("." not in cleaned) and (" " in cleaned):
+            parts = re.findall(r"\d+", cleaned)
+            # iki grup → ondalık gibi kabul
+            if len(parts) == 2 and len(parts[1]) <= 3:
+                return parts[0] + "," + parts[1]
+            else:
+                return "".join(parts)
+
+        cleaned = cleaned.replace(" ", "")
+        return cleaned if cleaned else None
+
+    rows = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        daire = _parse_daire_line(lines[i])
+        if not daire:
+            i += 1
             continue
 
-        # Önce regex ile dene
-        m = re.search(
-            r'\b([A-Z]\d\s*D\d{1,2})\s+'   # C1 D1
-            r'(\d[\d\.,]*)\s+'             # ISI SAYACI
-            r'(\d[\d\.,]*)\s+'             # ISINMA
-            r'(\d[\d\.,]*)\s+'             # SICAK SU
-            r'(\d[\d\.,]*)\b',             # SOĞUK SU
-            line
-        )
+        # Bu bir daire → ardından 3-4 sayı gelecek
+        nums = []
+        j = i + 1
 
-        if m:
-            daire_raw = m.group(1).upper()
-            isi_raw   = m.group(2)
-            isin_raw  = m.group(3)
-            sicak_raw = m.group(4)
-            soguk_raw = m.group(5)
-        else:
-            # Regex tutmadıysa daha gevşek bir yöntem deneyelim
-            tokens = line.split()
-            if len(tokens) < 6:
-                continue
+        while j < n and len(nums) < 4:
+            if _parse_daire_line(lines[j]):
+                break
 
-            # C1 D1 ... şeklini yakalamaya çalış
-            t0 = tokens[0].upper()
-            t1 = tokens[1].upper()
+            num_str = _extract_number_str(lines[j])
+            if num_str is not None:
+                nums.append(num_str)
 
-            if not re.match(r"^[A-Z]\d$", t0):
-                continue
-            if not t1.startswith("D"):
-                continue
+            j += 1
 
-            daire_raw = f"{t0} {t1}"
+        # En az 3 sayı olmalı
+        if len(nums) >= 3:
+            isi_raw = nums[0]
+            digits_only = "".join(ch for ch in isi_raw if ch.isdigit())
+            isi_sayaci = int(digits_only) if digits_only else 0
 
-            # Kalan sayıları al
-            nums = tokens[2:]
-            if len(nums) < 4:
-                continue
+            isinma   = _to_float_tr(nums[1]) if len(nums) >= 2 else 0.0
+            sicak_su = _to_float_tr(nums[2]) if len(nums) >= 3 else 0.0
+            soguk_su = _to_float_tr(nums[3]) if len(nums) >= 4 else 0.0
 
-            isi_raw   = nums[0]
-            isin_raw  = nums[1]
-            sicak_raw = nums[2]
-            soguk_raw = nums[3]
+            rows.append({
+                "BÖLÜM/DAİRE": daire,
+                "ISI SAYACI": isi_sayaci,
+                "ISINMA": isinma,
+                "SICAK SU": sicak_su,
+                "SOĞUK SU": soguk_su,
+            })
 
-        # Buraya geldiysek satırı parse ettik
-        def clean_meter(s: str) -> int:
-            digits = "".join(ch for ch in str(s) if ch.isdigit())
-            return int(digits) if digits else 0
+        i = j
 
-        daire = daire_raw.replace("  ", " ").upper()
-
-        isi_sayaci = clean_meter(isi_raw)
-        isinma     = _to_float_tr(isin_raw)
-        sicak_su   = _to_float_tr(sicak_raw)
-        soguk_su   = _to_float_tr(soguk_raw)
-
-        rows.append({
-            "BÖLÜM/DAİRE": daire,
-            "ISI SAYACI": isi_sayaci,
-            "ISINMA": isinma,
-            "SICAK SU": sicak_su,
-            "SOĞUK SU": soguk_su,
-        })
-
-    return pd.DataFrame(rows)
-
-# -----------------------------------------------------------------------------
+    return pd.DataFrame(rows)# -----------------------------------------------------------------------------
 # Alt Yazı (wrap & overlay)
 # -----------------------------------------------------------------------------
 def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
