@@ -10,12 +10,10 @@ google-auth==2.35.0
 google-auth-oauthlib==1.2.1
 pdfplumber==0.11.4
 
-# --- OCR için eklenenler ---
-easyocr==1.7.1
-Pillow==10.4.0
+# --- OCR için (A Şıkkı: EasyOCR yoluna göre) ---
 numpy==1.26.4
-
-# CPU torch (Streamlit Cloud ile uyumlu)
-torch==2.2.2+cpu
-torchvision==0.17.2+cpu
---extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2
+torchvision==0.17.2
+Pillow==10.4.0
+easyocr==1.7.1
+pdf2image==1.17.0
