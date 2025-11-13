@@ -91,14 +91,16 @@ try:
 except Exception:
     HAS_DOCX = False
 
-# ---------------- OCR (Tesseract) ----------------
+# ---------------- OCR (EasyOCR) ----------------
 OCR_READY = False
 OCR_IMPORT_ERROR = ""
 
 try:
     from PIL import Image
     from pdf2image import convert_from_bytes
-    import pytesseract
+    import numpy as np
+    import easyocr
+
     OCR_READY = True
 except Exception as e:
     OCR_READY = False
