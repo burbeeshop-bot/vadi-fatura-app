@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple, Optional
 
 import streamlit as st
 import pandas as pd
+
 # ---------------- GOOGLE DRIVE: Secrets ile bağlan & yardımcılar ----------------
 try:
     from google.oauth2 import service_account
@@ -13,9 +14,6 @@ try:
     _GDRIVE_OK = True
 except Exception:
     _GDRIVE_OK = False
-
-import streamlit as st
-import json
 
 @st.cache_resource(show_spinner=False)
 def get_drive_service_from_secrets():
@@ -75,6 +73,7 @@ def build_direct_file_link(file_id: str, mode: str = "download") -> str:
         return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
     else:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
+
 # PDF
 from pypdf import PdfReader, PdfWriter
 
@@ -83,14 +82,11 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# OCR (el yazısı endeksleri okumak için)
-try:
-    from PIL import Image
-    import pytesseract
-    from pdf2image import convert_from_bytes
-    HAS_OCR = True
-except Exception:
-    HAS_OCR = False
+# OCR (EasyOCR)
+from PIL import Image
+from pdf2image import convert_from_bytes
+import numpy as np
+import easyocr
 
 # (opsiyonel) .docx
 try:
@@ -128,55 +124,7 @@ def _to_float_tr(s: str) -> float:
         return float(s)
     except:
         return 0.0
-def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
-    """
-    El yazılı 'su ve ısınma endeksleri' sayfasından OCR ile çıkan metni satır satır tarar.
-    Beklenen kolonlar: BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU
-    """
-    rows = []
-    # satır bazlı çalışıyoruz
-    for raw_line in text.splitlines():
-        line = raw_line.replace("\t", " ").strip()
-        if not line:
-            continue
 
-        # Örnek beklenen pattern:
-        # C1 D1   12564154   62.557   308.7   314.5
-        m = re.search(
-            r'\b([A-Z]\d\s*D\d{1,2})\s+'
-            r'(\d[\d\.,]*)\s+'        # ISI SAYACI
-            r'(\d[\d\.,]*)\s+'        # ISINMA
-            r'(\d[\d\.,]*)\s+'        # SICAK
-            r'(\d[\d\.,]*)\b',        # SOĞUK
-            line
-        )
-        if not m:
-            continue
-
-        daire = m.group(1).upper().replace(" ", "")
-        # C1D1 → C1 D1
-        if len(daire) == 3 and daire[2].isdigit():
-            daire = daire[:2] + " D" + daire[2:]
-
-        def clean_meter(s: str) -> int:
-            digits = "".join(ch for ch in s if ch.isdigit())
-            return int(digits) if digits else 0
-
-        isi_sayaci = clean_meter(m.group(2))
-        isinma     = _to_float_tr(m.group(3))
-        sicak_su   = _to_float_tr(m.group(4))
-        soguk_su   = _to_float_tr(m.group(5))
-
-        rows.append({
-            "BÖLÜM/DAİRE": daire,
-            "ISI SAYACI": isi_sayaci,
-            "ISINMA": isinma,
-            "SICAK SU": sicak_su,
-            "SOĞUK SU": soguk_su,
-        })
-
-    return pd.DataFrame(rows)
-    
 def _normalize_tr(t: str) -> str:
     """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
@@ -237,7 +185,7 @@ def _parse_endeks_text_to_df(text: str) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
-    
+
 def _norm_colname(s: str) -> str:
     return (str(s).strip().lower()
             .replace("\n"," ").replace("\r"," ")
@@ -798,7 +746,7 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
         if need not in df2.columns:
             # Basit hata gösterimi için aynı uyarı metnini kullanalım
             cols_map_debug = {c: _norm_rehber(c) for c in df.columns}
-            st.error(f"Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
+            st.error("Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
             st.write("Algılanan kolonlar (normalize):", cols_map_debug)
             raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
@@ -826,7 +774,6 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     df2["DaireID"] = df2["Blok"] + "-" + df2["Daire No"]
 
     return df2[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
-
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """
@@ -873,52 +820,9 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return out
 
 # -----------------------------------------------------------------------------
-# Google Drive — Servis Hesabı ile klasörden PDF listeleme + tekil link üretme
+# Google Drive sabitleri
 # -----------------------------------------------------------------------------
 DEFAULT_DRIVE_FOLDER_ID = "1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"  # senin verdiğin klasör
-
-def _drive_available() -> bool:
-    try:
-        import googleapiclient.discovery  # noqa
-        from google.oauth2 import service_account  # noqa
-        return True
-    except Exception:
-        return False
-
-def get_drive_service(json_key_path: str):
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    scopes = ["https://www.googleapis.com/auth/drive"]
-    creds = service_account.Credentials.from_service_account_file(json_key_path, scopes=scopes)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-def list_pdfs_in_folder(service, folder_id: str) -> list[dict]:
-    q = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false"
-    fields = "files(id,name,webViewLink,webContentLink),nextPageToken"
-    files = []
-    page_token = None
-    while True:
-        resp = service.files().list(q=q, fields=fields, pageToken=page_token).execute()
-        items = resp.get("files", [])
-        files.extend(items)
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return files
-
-def ensure_anyone_viewer_and_get_link(service, file_id: str) -> str:
-    """Dosyayı linke sahip herkese 'görüntüleyici' yapar ve webViewLink döner."""
-    # link permissions — errors ignore if already exists
-    try:
-        service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id"
-        ).execute()
-    except Exception:
-        pass
-    file_meta = service.files().get(fileId=file_id, fields="webViewLink").execute()
-    return file_meta.get("webViewLink", f"https://drive.google.com/file/d/{file_id}/view")
 
 def extract_daire_from_filename(name: str) -> Optional[str]:
     """
@@ -939,7 +843,7 @@ def extract_daire_from_filename(name: str) -> Optional[str]:
     return f"{blok}-{dno}"
 
 # -----------------------------------------------------------------------------
-# UI — 3 Sekme
+# UI — 6 Sekme
 # -----------------------------------------------------------------------------
 st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
@@ -951,6 +855,7 @@ tab_a, tab_b, tab_ocr, tab_c, tab_w, tab_r = st.tabs([
     "📲 WhatsApp Gönder (Cloud API)",
     "📑 Gelir-Gider Raporu (PDF)"
 ])
+
 # ---------------- TAB A: Böl & Alt Yazı ----------------
 with tab_a:
     pdf_file = st.file_uploader("Fatura PDF dosyasını yükle", type=["pdf"], key="pdf_a")
@@ -1036,7 +941,7 @@ with tab_a:
             st.warning("Lütfen önce bir PDF yükleyin.")
             st.stop()
 
-        src = pdf_file.read()
+        src = pdf_file.getvalue()
 
         if mode == "Sadece sayfalara böl":
             pages = split_pdf(src)
@@ -1098,17 +1003,17 @@ with tab_b:
     colM1, colM2 = st.columns(2)
     with colM1:
         aps_mode = st.radio(
-    "Doldurma Şekli",
-    [
-        "Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)",
-        "Seçenek 2 (G1=Toplam, G2/G3 boş)",
-        "Seçenek 3 (G1=Sıcak Su)",
-        "Seçenek 4 (G1=Su)",
-        "Seçenek 5 (G1=Isıtma)"
-    ],
-    index=0,
-    key="aps_mode"
-)
+            "Doldurma Şekli",
+            [
+                "Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)",
+                "Seçenek 2 (G1=Toplam, G2/G3 boş)",
+                "Seçenek 3 (G1=Sıcak Su)",
+                "Seçenek 4 (G1=Su)",
+                "Seçenek 5 (G1=Isıtma)"
+            ],
+            index=0,
+            key="aps_mode"
+        )
     with colM2:
         exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su", key="aps_exp1")
         exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su", key="aps_exp2")
@@ -1147,101 +1052,9 @@ with tab_b:
             key="dl_aps"
         )
 
-# ---------------- TAB OCR: El Yazısı Endeks → Excel ----------------
+# ---------------- TAB OCR: El Yazısı Su & Isınma Endeksleri → Excel (EasyOCR) ----------------
 with tab_ocr:
     st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
-
-    if not HAS_OCR:
-        st.error("OCR modülü yüklü değil. Sunucuda `tesseract-ocr` ve Python için "
-                 "`pytesseract, pdf2image, Pillow` kurulu olmalı.")
-        st.stop()
-
-    st.markdown("""
-    - El yazılı **'07.11.2025 su ve ısınma endeksleri'** sayfasının **fotoğrafını veya PDF'ini** yükle.
-    - Program OCR ile satırları okuyup tek sayfalık **Excel** üretecek.
-    - Çıkan tablo: `BÖLÜM/DAİRE, ISI SAYACI, ISINMA, SICAK SU, SOĞUK SU`.
-    """)
-
-    up_files = st.file_uploader(
-        "Sayfa(lar)ı yükle (JPG/PNG/PDF)",
-        type=["jpg", "jpeg", "png", "pdf"],
-        accept_multiple_files=True,
-        key="ocr_files"
-    )
-
-    lang = st.selectbox(
-        "Tesseract dili",
-        ["tur", "tur+eng"],
-        index=0,
-        help="`tur` genelde yeterli. Bazı sayılarda sorun olursa `tur+eng` deneyebilirsin."
-    )
-
-    ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
-
-    if ocr_go:
-        if not up_files:
-            st.warning("En az bir dosya yüklemelisin.")
-            st.stop()
-
-        all_dfs = []
-
-        for f in up_files:
-            bytes_data = f.read()
-            pages_images = []
-
-            if f.name.lower().endswith(".pdf"):
-                # PDF → image list
-                try:
-                    pages_images = convert_from_bytes(bytes_data, dpi=300)
-                except Exception as e:
-                    st.error(f"{f.name} PDF görüntüye çevrilemedi: {e}")
-                    continue
-            else:
-                # doğrudan resim
-                try:
-                    img = Image.open(io.BytesIO(bytes_data))
-                    pages_images = [img]
-                except Exception as e:
-                    st.error(f"{f.name} görüntü olarak açılamadı: {e}")
-                    continue
-
-            for page_idx, img in enumerate(pages_images, start=1):
-                # OCR
-                ocr_text = pytesseract.image_to_string(img, lang=lang)
-                df_page = _parse_endeks_text_to_df(ocr_text)
-                if df_page.empty:
-                    st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
-                else:
-                    df_page["KAYNAK_DOSYA"] = f.name
-                    df_page["SAYFA"] = page_idx
-                    all_dfs.append(df_page)
-
-        if not all_dfs:
-            st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
-            st.stop()
-
-        df_all = pd.concat(all_dfs, ignore_index=True)
-
-        st.success(f"{len(df_all)} satır okundu.")
-        st.dataframe(df_all, use_container_width=True)
-
-        # Excel çıktısı
-        excel_bytes = export_excel_bytes(df_all, filename="Endeksler_OCR.xlsx")
-        st.download_button(
-            "📥 Endeksler_OCR.xlsx indir",
-            excel_bytes,
-            file_name="Endeksler_OCR.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-        # ---------------- TAB OCR: El Yazısı Endeks → Excel ----------------
-with tab_ocr:
-    st.subheader("📷 El Yazısı Su & Isınma Endeksleri → Excel")
-
-    if not HAS_OCR:
-        st.error("OCR modülü yüklü değil. Sunucuda `tesseract-ocr` ve Python için "
-                 "`pytesseract, pdf2image, Pillow` kurulu olmalı.")
-        st.stop()
 
     st.markdown("""
     - El yazılı **su ve ısınma endeksleri** sayfasının fotoğrafını veya PDF'ini yükle.
@@ -1256,13 +1069,6 @@ with tab_ocr:
         key="ocr_files"
     )
 
-    lang = st.selectbox(
-        "Tesseract dili",
-        ["tur", "tur+eng"],
-        index=0,
-        help="Türkçe için `tur` genelde yeterli. Gerekirse `tur+eng` deneyebilirsin."
-    )
-
     ocr_go = st.button("🔍 Oku ve Excel üret", key="ocr_go")
 
     if ocr_go:
@@ -1270,7 +1076,8 @@ with tab_ocr:
             st.warning("En az bir dosya yüklemelisin.")
             st.stop()
 
-        all_dfs = []
+        reader = easyocr.Reader(["en"], gpu=False)
+        all_rows = []
 
         for f in ocr_files:
             bytes_data = f.read()
@@ -1293,21 +1100,23 @@ with tab_ocr:
                     continue
 
             for page_idx, img in enumerate(pages_images, start=1):
-                # OCR
-                ocr_text = pytesseract.image_to_string(img, lang=lang)
+                np_img = np.array(img)
+                text_lines = reader.readtext(np_img, detail=0)
+                ocr_text = "\n".join(text_lines)
+
                 df_page = _parse_endeks_text_to_df(ocr_text)
                 if df_page.empty:
                     st.warning(f"{f.name} / sayfa {page_idx}: Satır bulunamadı (parser eşleşmedi).")
                 else:
                     df_page["KAYNAK_DOSYA"] = f.name
                     df_page["SAYFA"] = page_idx
-                    all_dfs.append(df_page)
+                    all_rows.append(df_page)
 
-        if not all_dfs:
+        if not all_rows:
             st.error("Hiçbir sayfadan veri çekilemedi. OCR çıktısını kontrol etmek gerek.")
             st.stop()
 
-        df_all = pd.concat(all_dfs, ignore_index=True)
+        df_all = pd.concat(all_rows, ignore_index=True)
 
         st.success(f"{len(df_all)} satır okundu.")
         st.dataframe(df_all, use_container_width=True)
@@ -1321,7 +1130,7 @@ with tab_ocr:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-        
+
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
@@ -1419,135 +1228,133 @@ with tab_c:
                                file_name="WhatsApp_Recipients.csv", mime="text/csv", use_container_width=True, key="dl_csv")
 
     # --- Yol 2: Google Drive klasöründen PDF listele + tekil link üret ---
-with wa_tab2:
-    st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
-    if not _GDRIVE_OK:
-        st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\npip install google-api-python-client google-auth google-auth-oauthlib")
-    else:
-        # JSON dosya yolu GİTTİ. Secrets kullanıyoruz.
-        folder_id = st.text_input(
-            "Drive Folder ID",
-            value=DEFAULT_DRIVE_FOLDER_ID,
-            help="Klasör ID: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
-        )
-
-        # Rehber yükleme (Apsiyon ham dosyası)
-        rehber_up2 = st.file_uploader(
-            "Rehber (XLSX/CSV) — Apsiyon ham dosya",
-            type=["xlsx","csv"], key="wa_rehber2"
-        )
-
-        link_mode = st.radio(
-            "Link tipi",
-            ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
-            horizontal=True
-        )
-
-        drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret", use_container_width=True)
-
-        if drive_go:
-            if not folder_id.strip():
-                st.error("Folder ID boş olamaz."); st.stop()
-            if not rehber_up2:
-                st.error("Rehber dosyası yükleyin."); st.stop()
-
-            # 1) Drive servisine bağlan (Secrets)
-            try:
-                service = get_drive_service_from_secrets()
-            except Exception as e:
-                st.error(f"Drive servisine bağlanılamadı: {e}")
-                st.stop()
-
-            # 2) Klasördeki PDF'leri çek
-            try:
-                gfiles = list_pdfs_in_folder(service, folder_id.strip())
-            except Exception as e:
-                st.error(f"Klasör listelenemedi: {e}")
-                st.stop()
-
-            if not gfiles:
-                st.warning("Klasörde PDF bulunamadı."); st.stop()
-
-            # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
-            import re, pandas as pd
-            pdf_rows = []
-            for f in gfiles:
-                base = f.get("name","")
-                m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
-                     or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
-                     or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
-                daire_id = None
-                if m:
-                    try:
-                        daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
-                    except:
-                        daire_id = f"{m.group(1).upper()}-{m.group(2)}"
-                pdf_rows.append({"file_name": base, "DaireID": daire_id, "file_id": f["id"]})
-            pdf_df = pd.DataFrame(pdf_rows)
-
-            # 4) Rehberi oku
-            try:
-                rehber_df = load_contacts_any(rehber_up2.read(), rehber_up2.name)
-            except Exception as e:
-                st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
-
-            # 5) Eşleştir
-            merged = pdf_df.merge(
-                rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
-                on="DaireID",
-                how="left"
+    with wa_tab2:
+        st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
+        if not _GDRIVE_OK:
+            st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\npip install google-api-python-client google-auth google-auth-oauthlib")
+        else:
+            folder_id = st.text_input(
+                "Drive Folder ID",
+                value=DEFAULT_DRIVE_FOLDER_ID,
+                help="Klasör ID: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
             )
 
-            # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
-            # (sadece dosya bazında; klasör listing açılmaz)
-            link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
+            # Rehber yükleme (Apsiyon ham dosyası)
+            rehber_up2 = st.file_uploader(
+                "Rehber (XLSX/CSV) — Apsiyon ham dosya",
+                type=["xlsx","csv"], key="wa_rehber2"
+            )
 
-            st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
-            for i, row in merged.iterrows():
-                fid = row.get("file_id")
-                if not fid:
-                    continue
+            link_mode = st.radio(
+                "Link tipi",
+                ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
+                horizontal=True
+            )
+
+            drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret", use_container_width=True)
+
+            if drive_go:
+                if not folder_id.strip():
+                    st.error("Folder ID boş olamaz."); st.stop()
+                if not rehber_up2:
+                    st.error("Rehber dosyası yükleyin."); st.stop()
+
+                # 1) Drive servisine bağlan (Secrets)
                 try:
-                    ensure_anyone_with_link_permission(service, fid)
-                except Exception:
-                    pass
-                merged.at[i, "file_url"] = build_direct_file_link(fid, link_kind)
+                    service = get_drive_service_from_secrets()
+                except Exception as e:
+                    st.error(f"Drive servisine bağlanılamadı: {e}")
+                    st.stop()
 
-            # 7) Önizleme + CSV
-            a1, a2, a3 = st.columns(3)
-            with a1: st.metric("Toplam kayıt", len(merged))
-            with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-            with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+                # 2) Klasördeki PDF'leri çek
+                try:
+                    gfiles = list_pdfs_in_folder(service, folder_id.strip())
+                except Exception as e:
+                    st.error(f"Klasör listelenemedi: {e}")
+                    st.stop()
 
-            st.markdown("**Eşleştirme Önizleme**")
-            st.dataframe(
-                merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
-                use_container_width=True, height=600
-            )
+                if not gfiles:
+                    st.warning("Klasörde PDF bulunamadı."); st.stop()
 
-            out_csv = merged.rename(columns={
-                "Telefon": "phone",
-                "Ad Soyad / Unvan": "name",
-                "DaireID": "daire_id",
-                "file_name": "file_name",
-                "file_url": "file_url",
-            })[["phone","name","daire_id","file_name","file_url"]]
-            b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "📥 WhatsApp_Recipients.csv (Drive linkli)",
-                b_csv,
-                file_name="WhatsApp_Recipients.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+                # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
+                pdf_rows = []
+                for f in gfiles:
+                    base = f.get("name","")
+                    m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
+                         or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
+                         or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
+                    daire_id = None
+                    if m:
+                        try:
+                            daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
+                        except:
+                            daire_id = f"{m.group(1).upper()}-{m.group(2)}"
+                    pdf_rows.append({"file_name": base, "DaireID": daire_id, "file_id": f["id"]})
+                pdf_df = pd.DataFrame(pdf_rows)
 
-            with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
-                st.code(
-                    "Merhaba {name},\n"
-                    "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
-                    "Dosyayı butondan görüntüleyebilirsiniz.\n",
-                    language="text"
+                # 4) Rehberi oku
+                try:
+                    rehber_df = load_contacts_any(rehber_up2.read(), rehber_up2.name)
+                except Exception as e:
+                    st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
+
+                # 5) Eşleştir
+                merged = pdf_df.merge(
+                    rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
+                    on="DaireID",
+                    how="left"
                 )
+
+                # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
+                link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
+
+                st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
+                for i, row in merged.iterrows():
+                    fid = row.get("file_id")
+                    if not fid:
+                        continue
+                    try:
+                        ensure_anyone_with_link_permission(service, fid)
+                    except Exception:
+                        pass
+                    merged.at[i, "file_url"] = build_direct_file_link(fid, link_kind)
+
+                # 7) Önizleme + CSV
+                a1, a2, a3 = st.columns(3)
+                with a1: st.metric("Toplam kayıt", len(merged))
+                with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+                with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+
+                st.markdown("**Eşleştirme Önizleme**")
+                st.dataframe(
+                    merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                    use_container_width=True, height=600
+                )
+
+                out_csv = merged.rename(columns={
+                    "Telefon": "phone",
+                    "Ad Soyad / Unvan": "name",
+                    "DaireID": "daire_id",
+                    "file_name": "file_name",
+                    "file_url": "file_url",
+                })[["phone","name","daire_id","file_name","file_url"]]
+                b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "📥 WhatsApp_Recipients.csv (Drive linkli)",
+                    b_csv,
+                    file_name="WhatsApp_Recipients.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+                with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
+                    st.code(
+                        "Merhaba {name},\n"
+                        "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
+                        "Dosyayı butondan görüntüleyebilirsiniz.\n",
+                        language="text"
+                    )
+
 # ---------------- TAB W: WhatsApp Gönder (Cloud API) ----------------
 with tab_w:
     st.markdown("### 📲 WhatsApp Gönder (Meta Cloud API)")
@@ -1595,7 +1402,6 @@ with tab_w:
     go_send = st.button("🚀 Gönderimi Başlat", use_container_width=True, key="wa_send")
 
     import time, requests
-    import pandas as pd
 
     def _ok_number(s: str) -> str:
         s = str(s or "").strip()
@@ -1670,12 +1476,11 @@ with tab_w:
         return r
 
     if preview_btn and csv_up:
-        df = pd.read_csv(csv_up, dtype=str).fillna("")
-        st.dataframe(df.head(50), use_container_width=True)
-        st.success(f"{len(df)} alıcı yüklendi.")
+        df_prev = pd.read_csv(csv_up, dtype=str).fillna("")
+        st.dataframe(df_prev.head(50), use_container_width=True)
+        st.success(f"{len(df_prev)} alıcı yüklendi.")
 
     if go_send:
-        # doğrulamalar
         if not csv_up:
             st.error("Önce CSV yükleyin."); st.stop()
         if not wa_token or not phone_number_id:
@@ -1715,7 +1520,6 @@ with tab_w:
 
             # 2) Pencere açıksa follow-up (opsiyonel)
             if success:
-                # küçük bekleme (rate limit / ordering)
                 time.sleep(0.4)
                 if send_followup_text and followup_text:
                     try:
@@ -1735,62 +1539,7 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
-        # ---------------- TAB OCR: El Yazısı Su & Isınma Endeksleri → Excel ----------------
-with st.tab("📷 Endeks OCR → Excel"):
 
-    st.header("📷 El Yazısı Su & Isınma Endeksleri → Excel")
-
-    # OCR kütüphaneleri hazır mı?
-    try:
-        import easyocr
-        from pdf2image import convert_from_bytes
-        import numpy as np
-        OCR_READY = True
-    except Exception as e:
-        OCR_READY = False
-        st.error("OCR modülü yüklü değil. Sunucuda easyocr, torch, pdf2image, Pillow kurulu olmalı.")
-        st.info(str(e))
-
-    if not OCR_READY:
-        st.stop()
-
-    pdf_file_ocr = st.file_uploader("🧾 El yazısı ENDÜKS PDF yükleyin", type=["pdf"])
-
-    if pdf_file_ocr:
-        if st.button("🚀 OCR Çalıştır ve Excel Oluştur"):
-            with st.spinner("OCR çalışıyor... lütfen bekleyin"):
-
-                # 1) PDF'i görüntüye çevir
-                pages = convert_from_bytes(pdf_file_ocr.read(), dpi=300)
-
-                reader = easyocr.Reader(["en"], gpu=False)
-
-                results = []
-
-                for idx, img in enumerate(pages, start=1):
-                    np_img = np.array(img)
-
-                    # OCR oku
-                    text_result = reader.readtext(np_img, detail=0)
-
-                    # tek string olarak birleştir
-                    joined = "\n".join(text_result)
-
-                    results.append({"Sayfa": idx, "Metin": joined})
-
-                df_out = pd.DataFrame(results)
-
-                st.subheader("📋 OCR Çıktısı (Ham Metin)")
-                st.dataframe(df_out, use_container_width=True)
-
-                # Excel olarak indir
-                from io import BytesIO
-                bio = BytesIO()
-                df_out.to_excel(bio, index=False)
-                st.download_button(
-                    "📥 OCR_Çıktısı.xlsx",
-                    bio.getvalue(),
-                    file_name="OCR_Endeks.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-        
+# ---------------- TAB R: Gelir-Gider Raporu (PDF) ----------------
+with tab_r:
+    st.markdown("Buraya daha sonra gelir-gider raporu PDF üretimi gelecek. Şu an placeholder.")
