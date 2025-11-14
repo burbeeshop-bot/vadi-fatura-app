@@ -558,26 +558,103 @@ def fill_expenses_to_apsiyon(
 
     return df
 
-def export_excel_bytes(
-    df: pd.DataFrame,
-    summary: Optional[dict] = None,
-    filename: str = "Apsiyon_Doldurulmus.xlsx"
-) -> bytes:
-    from io import BytesIO
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        # Ana Apsiyon sheet’i
-        df.to_excel(writer, index=False, sheet_name="Sheet1")
+# ---------------- TAB B: Apsiyon Gider Doldurucu ----------------
+with tab_b:
+    st.subheader("📊 Apsiyon Gider Doldurucu")
 
-        # Özet sheet’i (opsiyonel)
-        if summary is not None:
-            df_sum = pd.DataFrame([
-                {"Kalem": "PDF Toplamı",         "Tutar": summary.get("pdf_total", 0.0)},
-                {"Kalem": "Ek / Fark Tutarı",    "Tutar": summary.get("extra", 0.0)},
-                {"Kalem": "Genel Toplam",        "Tutar": summary.get("grand_total", 0.0)},
-            ])
-            df_sum.to_excel(writer, index=False, sheet_name="Ozet")
-    return bio.getvalue()
+    # Apsiyon boş şablon Excel
+    apsiyon_file = st.file_uploader(
+        "Apsiyon 'boş şablon' Excel dosyasını yükle (.xlsx)",
+        type=["xlsx"],
+        key="apsiyon_up",
+    )
+
+    colM1, colM2 = st.columns(2)
+    with colM1:
+        aps_mode = st.radio(
+            "Doldurma Şekli",
+            [
+                "Seçenek 1 (G1=Sıcak Su, G2=Su, G3=Isıtma)",
+                "Seçenek 2 (G1=Toplam, G2/G3 boş)",
+                "Seçenek 3 (G1=Sıcak Su)",
+                "Seçenek 4 (G1=Su)",
+                "Seçenek 5 (G1=Isıtma)",
+            ],
+            index=0,
+            key="aps_mode",
+        )
+    with colM2:
+        exp1 = st.text_input("Gider1 Açıklaması", value="Sıcak Su", key="aps_exp1")
+        exp2 = st.text_input("Gider2 Açıklaması", value="Soğuk Su", key="aps_exp2")
+        exp3 = st.text_input("Gider3 Açıklaması", value="Isıtma",    key="aps_exp3")
+
+    # 🔢 Manuel ek tutar (aydan aya değişen kalem için)
+    extra_amount = st.number_input(
+        "Manuel ek tutar (TL) — sayaç farkı / yuvarlama vb.",
+        min_value=0.0,
+        step=1.0,
+        value=0.0,
+        format="%.2f",
+        key="extra_amount",
+    )
+
+    go_fill = st.button("📥 PDF’ten tutarları çek ve Excel’e yaz", key="go_fill")
+
+    if go_fill:
+        # A sekmesinde yüklenen aynı PDF
+        pdf_bytes = st.session_state.get("pdf_bytes")
+        if not pdf_bytes:
+            st.warning("Önce A sekmesinde fatura PDF’sini yükleyin (aynı PDF).")
+            st.stop()
+
+        if not apsiyon_file:
+            st.warning("Apsiyon Excel şablonunu yükleyin.")
+            st.stop()
+
+        # 1) PDF’ten daire bazlı tutarları oku
+        totals_map = parse_manas_pdf_totals(pdf_bytes)
+        if not totals_map:
+            st.error("PDF’ten tutar okunamadı. (Daire başlıkları veya tutarlar bulunamadı)")
+            st.stop()
+
+        # 2) PDF toplamını ve ek tutarı hesapla
+        pdf_total = sum(v.get("toplam", 0.0) for v in totals_map.values())
+        extra = float(extra_amount)
+        grand_total = pdf_total + extra
+
+        st.info(
+            f"**PDF toplamı:** {pdf_total:,.2f} TL\n\n"
+            f"**Ek tutar:** {extra:,.2f} TL\n\n"
+            f"**Genel toplam:** {grand_total:,.2f} TL"
+        )
+
+        # 3) Apsiyon şablonunu oku
+        try:
+            df_aps = load_apsiyon_template(apsiyon_file.read())
+        except Exception as e:
+            st.error(f"Excel okunamadı: {e}")
+            st.stop()
+
+        # 4) Daire satırlarına giderleri yaz
+        df_out = fill_expenses_to_apsiyon(df_aps, totals_map, aps_mode, exp1, exp2, exp3)
+
+        # 5) Özet bilgiyi hazırlayıp Excel’e göm
+        summary = {
+            "pdf_total": pdf_total,
+            "extra": extra,
+            "grand_total": grand_total,
+        }
+
+        out_bytes = export_excel_bytes(df_out, summary=summary)
+
+        st.success("Excel dolduruldu.")
+        st.download_button(
+            "📥 Doldurulmuş Apsiyon Excel",
+            out_bytes,
+            file_name="Apsiyon_Doldurulmus.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_aps",
+        )
 # -----------------------------------------------------------------------------
 # Rehber Okuyucu (WhatsApp için) — Esnek: Apsiyon veya Basit CSV şeması
 # -----------------------------------------------------------------------------
