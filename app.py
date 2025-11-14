@@ -1082,7 +1082,6 @@ with tab_b:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_aps"
     )
-        )
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
