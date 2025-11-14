@@ -1048,7 +1048,7 @@ with tab_b:
         exp3 = st.text_input("Gider3 Açıklaması", value="Isıtma",    key="aps_exp3")
 
     extra_amount = st.number_input(
-        "Bu aya özel fark / ek tutar (TL, negatif de olabilir)",
+        "Her DAİRE için ek fark / düzeltme (TL, negatif de olabilir)",
         value=0.0,
         step=1.0,
         format="%.2f",
@@ -1067,46 +1067,55 @@ with tab_b:
             st.warning("Apsiyon Excel şablonunu yükleyin.")
             st.stop()
 
+        # 1) PDF’ten daire bazlı tutarları oku
         totals_map = parse_manas_pdf_totals(pdf_bytes)
         if not totals_map:
             st.error("PDF’ten tutar okunamadı. (Daire başlıkları veya tutarlar bulunamadı)")
             st.stop()
 
-        # 🔢 PDF toplamı + ek tutar + genel toplam
-        pdf_total = sum(v.get("toplam", 0.0) for v in totals_map.values())
+        # 2) Her dairenin TOPLAM'INA extra ekle (Seçenek 2'de mantıklı)
         extra = float(extra_amount)
-        grand_total = pdf_total + extra
+        if extra != 0.0:
+            for did, vals in totals_map.items():
+                vals["toplam"] = vals.get("toplam", 0.0) + extra
+
+        # 3) PDF toplamını (artık dairelere eklenmiş haliyle) hesapla
+        pdf_total = sum(v.get("toplam", 0.0) for v in totals_map.values())
+        # Burada "extra" zaten her dairenin toplamına işlendi, o yüzden ayrıca grand_total
+        # hesabında tekrar toplama yapmıyoruz; pdf_total zaten güncel hali.
+        grand_total = pdf_total
 
         st.info(
-            f"**PDF toplamı:** {pdf_total:,.2f} TL\n\n"
-            f"**Ek/Fark:** {extra:,.2f} TL\n\n"
-            f"**Genel toplam:** {grand_total:,.2f} TL"
+            f"**Dairelere eklenmiş yeni PDF toplamı:** {pdf_total:,.2f} TL\n\n"
+            f"(Her daireye eklenen fark: {extra:,.2f} TL)"
         )
 
+        # 4) Apsiyon şablonunu oku
         try:
             df_aps = load_apsiyon_template(apsiyon_file.read())
         except Exception as e:
             st.error(f"Excel okunamadı: {e}")
             st.stop()
 
+        # 5) Daire satırlarına giderleri yaz
         df_out = fill_expenses_to_apsiyon(df_aps, totals_map, aps_mode, exp1, exp2, exp3)
 
+        # 6) Özet bilgiyi hazırlayıp Excel’e göm
         summary = {
-            "pdf_total": pdf_total,
-            "extra": extra,
-            "grand_total": grand_total,
+            "ek_fark_her_daire": extra,
+            "pdf_total_yeni": pdf_total,
         }
 
         out_bytes = export_excel_bytes(df_out, summary=summary)
+
         st.success("Excel dolduruldu.")
         st.download_button(
             "📥 Doldurulmuş Apsiyon Excel",
             out_bytes,
             file_name="Apsiyon_Doldurulmus.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_aps"
+            key="dl_aps",
         )
-
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
