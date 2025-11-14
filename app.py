@@ -1034,7 +1034,7 @@ with tab_b:
     go_fill = st.button("📥 PDF’ten tutarları çek ve Excel’e yaz", key="go_fill")
 
     if go_fill:
-    pdf_bytes = st.session_state.get("pdf_bytes")
+        pdf_bytes = st.session_state.get("pdf_bytes")
     if not pdf_bytes:
         st.warning("Önce A sekmesinde fatura PDF’sini yükleyin (aynı PDF).")
         st.stop()
