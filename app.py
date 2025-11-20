@@ -1,5 +1,5 @@
 # app.py
-# === Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
+# === Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
 import io, os, re, zipfile, unicodedata, json, uuid, time
 from typing import List, Dict, Tuple, Optional
 
