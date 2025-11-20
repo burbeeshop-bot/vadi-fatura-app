@@ -862,7 +862,7 @@ def send_document_msg(access_token: str, phone_id: str, to: str, file_url: str, 
 # -----------------------------------------------------------------------------
 # UI — Sekmeler
 # -----------------------------------------------------------------------------
-st.title("🧾 Vadi Fatura — Böl & Alt Yazı & Apsiyon")
+st.title("🧾 Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
 tab_a, tab_b, tab_c, tab_w, tab_r = st.tabs([
     "📄 Böl & Alt Yazı",
