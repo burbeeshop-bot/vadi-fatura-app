@@ -944,7 +944,7 @@ with tab_a:
     )
 
     with t1:
-        footer_text = st.text_area("Alt yazı", value=default_text, height=220, key="footer_text")
+        footer_text = st.text_area("Alt yazı (kalın yapmak istediğiniz kelimenin başına ve sonuna ** hem büyük hem kalın yapmak istiyorsanız *** ", value=default_text, height=220, key="footer_text")
 
     with t2:
         if not HAS_DOCX:
