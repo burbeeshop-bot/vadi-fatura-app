@@ -186,11 +186,7 @@ def build_footer_overlay(
     box_height: int = 180,
     bold_rules: bool = True,
 ) -> io.BytesIO:
-    """
-    Alt yazıda hem satır bazlı BOLD hem de **inline BOLD** destekler:
-    Örn:
-      Bu metin **KALIN** ama bu değil.
-    """
+
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page_w, page_h))
 
@@ -198,7 +194,6 @@ def build_footer_overlay(
     right_margin = 36
     max_text_width = page_w - left_margin - right_margin
 
-    # önce wrap
     wrapped = wrap_by_width(footer_text, "NotoSans-Regular", font_size, max_text_width)
     max_lines = max(1, int(box_height // leading))
     wrapped = wrapped[:max_lines]
@@ -210,58 +205,70 @@ def build_footer_overlay(
         y = y_start - idx * leading
         x = left_margin
 
-        # Otomatik BOLD (isteğe bağlı)
         auto_bold = False
         if bold_rules:
             u = line.strip().upper()
-            if idx == 0 and u.startswith("SON ÖDEME"):
-                auto_bold = True
-            if u == "AÇIKLAMA":
-                auto_bold = True
-            if "TARİHLİ TEMSİLCİLER" in u:
-                auto_bold = True
+            if idx == 0 and u.startswith("SON ÖDEME"): auto_bold = True
+            if u == "AÇIKLAMA": auto_bold = True
+            if "TARİHLİ TEMSİLCİLER" in u: auto_bold = True
 
-        # Eğer tüm satır elle **...** ile işaretlendiyse
-        if line.strip().startswith("**") and line.strip().endswith("**") and len(line.strip()) > 4:
-            pure = line.strip()[2:-2]
-            font = "NotoSans-Bold"
-            can.setFont(font, font_size)
+        # Tek parça satır için:
+        if line.strip().startswith("***") and line.strip().endswith("***"):
+            pure = line.strip()[3:-3]
+            fs = font_size + 2
+            can.setFont("NotoSans-Bold", fs)
             can.drawString(x, y, pure)
             continue
 
-        # INLINE BOLD parçalama
+        if line.strip().startswith("**") and line.strip().endswith("**"):
+            pure = line.strip()[2:-2]
+            can.setFont("NotoSans-Bold", font_size)
+            can.drawString(x, y, pure)
+            continue
+
+        # INLINE işleme
         parts = []
         temp = ""
-        bold_on = False
+        mode = 0  # 0=normal, 1=**, 2=***
+
         i = 0
         while i < len(line):
-            if line[i:i+2] == "**":
+            if line[i:i+3] == "***":
                 if temp:
-                    parts.append((temp, bold_on))
-                bold_on = not bold_on
+                    parts.append((temp, mode))
+                mode = 2 if mode != 2 else 0
+                temp = ""
+                i += 3
+            elif line[i:i+2] == "**":
+                if temp:
+                    parts.append((temp, mode))
+                mode = 1 if mode != 1 else 0
                 temp = ""
                 i += 2
             else:
                 temp += line[i]
                 i += 1
         if temp:
-            parts.append((temp, bold_on))
+            parts.append((temp, mode))
 
-        # otomatik bold tüm satıra uygulanacaksa override et
         if auto_bold:
-            parts = [(p, True) for p, _ in parts]
+            parts = [(p, max(m,1)) for p, m in parts]
 
-        # parçaları sırayla çiz
-        for text, is_bold in parts:
-            font = "NotoSans-Bold" if is_bold else "NotoSans-Regular"
-            can.setFont(font, font_size)
+        for text, m in parts:
+            if m == 0:  # normal
+                fn = "NotoSans-Regular"; fs = font_size
+            elif m == 1:  # **
+                fn = "NotoSans-Bold"; fs = font_size
+            else:  # ***
+                fn = "NotoSans-Bold"; fs = font_size + 2
+
+            can.setFont(fn, fs)
             can.drawString(x, y, text)
-            x += pdfmetrics.stringWidth(text, font, font_size)
+            x += pdfmetrics.stringWidth(text, fn, fs)
 
     can.save()
     packet.seek(0)
     return packet
-
 def add_footer_to_pdf(src_bytes: bytes, **kw) -> bytes:
     reader = PdfReader(io.BytesIO(src_bytes))
     writer = PdfWriter()
