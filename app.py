@@ -181,11 +181,16 @@ def build_footer_overlay(
     footer_text: str,
     font_size: int = 11,
     leading: int = 14,
-    align: str = "left",  # "left" | "center"
+    align: str = "left",
     bottom_margin: int = 48,
     box_height: int = 180,
     bold_rules: bool = True,
 ) -> io.BytesIO:
+    """
+    Alt yazıda hem satır bazlı BOLD hem de **inline BOLD** destekler:
+    Örn:
+      Bu metin **KALIN** ama bu değil.
+    """
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(page_w, page_h))
 
@@ -193,41 +198,65 @@ def build_footer_overlay(
     right_margin = 36
     max_text_width = page_w - left_margin - right_margin
 
+    # önce wrap
     wrapped = wrap_by_width(footer_text, "NotoSans-Regular", font_size, max_text_width)
-
     max_lines = max(1, int(box_height // leading))
-    if len(wrapped) > max_lines:
-        wrapped = wrapped[:max_lines]
+    wrapped = wrapped[:max_lines]
 
     y_start = bottom_margin + (len(wrapped) - 1) * leading + 4
 
-    for i, raw_line in enumerate(wrapped):
+    for idx, raw_line in enumerate(wrapped):
         line = raw_line
-        use_bold = False
+        y = y_start - idx * leading
+        x = left_margin
 
-        # 1) Elle işaretlenmiş satırlar: **...**
-        stripped = line.strip()
-        if stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
-            use_bold = True
-            line = stripped[2:-2]  # baştaki ve sondaki ** işaretlerini kaldır
-
-        # 2) Otomatik kurallar (istersen aynen bırak, istersen sil/güncelle)
-        if bold_rules and not use_bold:
+        # Otomatik BOLD (isteğe bağlı)
+        auto_bold = False
+        if bold_rules:
             u = line.strip().upper()
-            if i == 0 and u.startswith("SON ÖDEME"):
-                use_bold = True
+            if idx == 0 and u.startswith("SON ÖDEME"):
+                auto_bold = True
             if u == "AÇIKLAMA":
-                use_bold = True
+                auto_bold = True
             if "TARİHLİ TEMSİLCİLER" in u:
-                use_bold = True
+                auto_bold = True
 
-        can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
-        y = y_start - i * leading
+        # Eğer tüm satır elle **...** ile işaretlendiyse
+        if line.strip().startswith("**") and line.strip().endswith("**") and len(line.strip()) > 4:
+            pure = line.strip()[2:-2]
+            font = "NotoSans-Bold"
+            can.setFont(font, font_size)
+            can.drawString(x, y, pure)
+            continue
 
-        if align == "center":
-            can.drawCentredString(page_w / 2.0, y, line)
-        else:
-            can.drawString(left_margin, y, line)
+        # INLINE BOLD parçalama
+        parts = []
+        temp = ""
+        bold_on = False
+        i = 0
+        while i < len(line):
+            if line[i:i+2] == "**":
+                if temp:
+                    parts.append((temp, bold_on))
+                bold_on = not bold_on
+                temp = ""
+                i += 2
+            else:
+                temp += line[i]
+                i += 1
+        if temp:
+            parts.append((temp, bold_on))
+
+        # otomatik bold tüm satıra uygulanacaksa override et
+        if auto_bold:
+            parts = [(p, True) for p, _ in parts]
+
+        # parçaları sırayla çiz
+        for text, is_bold in parts:
+            font = "NotoSans-Bold" if is_bold else "NotoSans-Regular"
+            can.setFont(font, font_size)
+            can.drawString(x, y, text)
+            x += pdfmetrics.stringWidth(text, font, font_size)
 
     can.save()
     packet.seek(0)
