@@ -201,9 +201,18 @@ def build_footer_overlay(
 
     y_start = bottom_margin + (len(wrapped) - 1) * leading + 4
 
-    for i, line in enumerate(wrapped):
+    for i, raw_line in enumerate(wrapped):
+        line = raw_line
         use_bold = False
-        if bold_rules:
+
+        # 1) Elle işaretlenmiş satırlar: **...**
+        stripped = line.strip()
+        if stripped.startswith("**") and stripped.endswith("**") and len(stripped) > 4:
+            use_bold = True
+            line = stripped[2:-2]  # baştaki ve sondaki ** işaretlerini kaldır
+
+        # 2) Otomatik kurallar (istersen aynen bırak, istersen sil/güncelle)
+        if bold_rules and not use_bold:
             u = line.strip().upper()
             if i == 0 and u.startswith("SON ÖDEME"):
                 use_bold = True
@@ -214,6 +223,7 @@ def build_footer_overlay(
 
         can.setFont("NotoSans-Bold" if use_bold else "NotoSans-Regular", font_size)
         y = y_start - i * leading
+
         if align == "center":
             can.drawCentredString(page_w / 2.0, y, line)
         else:
