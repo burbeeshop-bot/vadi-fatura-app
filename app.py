@@ -2,7 +2,7 @@
 # === Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
 import io, os, re, zipfile, unicodedata, json, uuid, time
 from typing import List, Dict, Tuple, Optional
-
+from urllib.parse import quote_plus
 import streamlit as st
 import pandas as pd
 import requests
@@ -863,14 +863,14 @@ def send_template(access_token: str, phone_id: str, to: str,
             ]
         })
         # BUTON URL: {{1}} = file_url
-        components.append({
-            "type": "button",
-            "sub_type": "url",
-            "index": "0",
-            "parameters": [
-                {"type": "text", "text": file_url or ""}
-            ]
-        })
+components.append({
+    "type": "button",
+    "sub_type": "url",
+    "index": "0",
+    "parameters": [
+        {"type": "text", "text": file_url or ""}
+    ]
+})
     else:
         # ESKİ tip şablonlar (body'de 3 değişken: {{1}}, {{2}}, {{3}})
         components.append({
