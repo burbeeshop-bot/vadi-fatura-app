@@ -850,21 +850,49 @@ def send_template(access_token: str, phone_id: str, to: str,
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
     components = []
-    # BODY vars
-    components.append({
-        "type": "body",
-        "parameters": [
-            {"type": "text", "text": name or ""},
-            {"type": "text", "text": daire_id or ""},
-            {"type": "text", "text": file_url or ""},
-        ]
-    })
-    # HEADER document varsa (şablonunuzda HEADER: DOCUMENT tanımlı olmalı)
+
+    # Eğer butonlu şablonumuz "fatura_goruntule" ise:
+    if t_name == "fatura_goruntule":
+        # BODY'de sadece {{1}} ve {{2}} var
+        components.append({
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": name or ""},
+                {"type": "text", "text": daire_id or ""},
+            ]
+        })
+        # URL butonu için {{3}} parametresi
+        components.append({
+            "type": "button",
+            "sub_type": "url",
+            "index": "0",
+            "parameters": [
+                {"type": "text", "text": file_url or ""}
+            ]
+        })
+    else:
+        # Eski 3 değişkenli şablonlar için (BODY'de {{1}}, {{2}}, {{3}})
+        components.append({
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": name or ""},
+                {"type": "text", "text": daire_id or ""},
+                {"type": "text", "text": file_url or ""},
+            ]
+        })
+
+    # HEADER document varsa (şablonda HEADER: DOCUMENT tanımlı ise)
     if header_doc and file_url:
         components.insert(0, {
             "type": "header",
             "parameters": [
-                {"type": "document", "document": {"link": file_url, "filename": f"{daire_id or 'Dosya'}.pdf"}}
+                {
+                    "type": "document",
+                    "document": {
+                        "link": file_url,
+                        "filename": f"{daire_id or 'Dosya'}.pdf"
+                    }
+                }
             ]
         })
 
@@ -878,8 +906,10 @@ def send_template(access_token: str, phone_id: str, to: str,
             "components": components
         }
     }
+
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     return r
+
 
 def send_text(access_token: str, phone_id: str, to: str, text: str):
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
