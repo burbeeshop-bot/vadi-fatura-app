@@ -16,6 +16,7 @@ try:
 except Exception:
     _GDRIVE_OK = False
 
+
 @st.cache_resource(show_spinner=False)
 def get_drive_service_from_secrets():
     """
@@ -28,6 +29,7 @@ def get_drive_service_from_secrets():
     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
     return service
+
 
 def list_pdfs_in_folder(service, folder_id: str):
     """
@@ -51,6 +53,7 @@ def list_pdfs_in_folder(service, folder_id: str):
             break
     return files
 
+
 def ensure_anyone_with_link_permission(service, file_id: str):
     """
     Dosyayı 'linke sahip olan görüntüleyebilir' yapar (sadece dosya bazında).
@@ -66,6 +69,7 @@ def ensure_anyone_with_link_permission(service, file_id: str):
         # zaten varsa vs. boşver
         pass
 
+
 def build_direct_file_link(file_id: str, mode: str = "download") -> str:
     """
     'download' -> doğrudan indirme linki
@@ -75,6 +79,7 @@ def build_direct_file_link(file_id: str, mode: str = "download") -> str:
         return f"https://drive.google.com/file/d/{file_id}/view?usp=drivesdk"
     else:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
+
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -112,6 +117,7 @@ def _pad3_digits(s: str) -> str:
     s = "".join(ch for ch in str(s) if ch.isdigit())
     return s.zfill(3) if s else "000"
 
+
 def _to_float_tr(s: str) -> float:
     if not s:
         return 0.0
@@ -121,26 +127,28 @@ def _to_float_tr(s: str) -> float:
     except:
         return 0.0
 
+
 def _normalize_tr(t: str) -> str:
     """Türkçe aksanları sadeleştir, büyük harfe çevir, spacing’i toparlar."""
     if not t:
         return ""
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    t = (t.replace("ı","i").replace("İ","I")
-           .replace("ş","s").replace("Ş","S")
-           .replace("ö","o").replace("Ö","O")
-           .replace("ü","u").replace("Ü","U")
-           .replace("ğ","g").replace("Ğ","G")
-           .replace("ç","c").replace("Ç","C"))
+    t = (t.replace("ı", "i").replace("İ", "I")
+           .replace("ş", "s").replace("Ş", "S")
+           .replace("ö", "o").replace("Ö", "O")
+           .replace("ü", "u").replace("Ü", "U")
+           .replace("ğ", "g").replace("Ğ", "G")
+           .replace("ç", "c").replace("Ç", "C"))
     t = t.upper()
     t = re.sub(r"[ \t]+", " ", t)
     return t
 
+
 def _norm_colname(s: str) -> str:
     return (str(s).strip().lower()
-            .replace("\n"," ").replace("\r"," ")
-            .replace(".","").replace("_"," ").replace("-"," "))
+            .replace("\n", " ").replace("\r", " ")
+            .replace(".", "").replace("_", " ").replace("-", " "))
 
 # -----------------------------------------------------------------------------
 # Alt Yazı (wrap & overlay)
@@ -175,6 +183,7 @@ def wrap_by_width(text: str, font_name: str, font_size: float, max_width: float)
         lines.append(current)
     return lines
 
+
 def build_footer_overlay(
     page_w: float,
     page_h: float,
@@ -208,9 +217,12 @@ def build_footer_overlay(
         auto_bold = False
         if bold_rules:
             u = line.strip().upper()
-            if idx == 0 and u.startswith("SON ÖDEME"): auto_bold = True
-            if u == "AÇIKLAMA": auto_bold = True
-            if "TARİHLİ TEMSİLCİLER" in u: auto_bold = True
+            if idx == 0 and u.startswith("SON ÖDEME"):
+                auto_bold = True
+            if u == "AÇIKLAMA":
+                auto_bold = True
+            if "TARİHLİ TEMSİLCİLER" in u:
+                auto_bold = True
 
         # Tek parça satır için:
         if line.strip().startswith("***") and line.strip().endswith("***"):
@@ -252,7 +264,7 @@ def build_footer_overlay(
             parts.append((temp, mode))
 
         if auto_bold:
-            parts = [(p, max(m,1)) for p, m in parts]
+            parts = [(p, max(m, 1)) for p, m in parts]
 
         for text, m in parts:
             if m == 0:  # normal
@@ -269,6 +281,8 @@ def build_footer_overlay(
     can.save()
     packet.seek(0)
     return packet
+
+
 def add_footer_to_pdf(src_bytes: bytes, **kw) -> bytes:
     reader = PdfReader(io.BytesIO(src_bytes))
     writer = PdfWriter()
@@ -282,6 +296,7 @@ def add_footer_to_pdf(src_bytes: bytes, **kw) -> bytes:
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
+
 
 def split_pdf(src_bytes: bytes) -> List[Tuple[str, bytes]]:
     reader = PdfReader(io.BytesIO(src_bytes))
@@ -306,21 +321,23 @@ _re_daire_raws = [
     re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DA[İI]RE[^0-9]{0,10}(\d{1,4})"),
 ]
 
+
 def _find_daire_id(raw_text: str) -> Optional[str]:
     norm = _normalize_tr(raw_text)
     for rx in _re_daire_norms:
         m = rx.search(norm)
         if m:
             blok = m.group(1).upper()
-            dno  = _pad3_digits(m.group(2))
+            dno = _pad3_digits(m.group(2))
             return f"{blok}-{dno}"
     for rx in _re_daire_raws:
         m = rx.search(raw_text)
         if m:
             blok = m.group(1).upper()
-            dno  = _pad3_digits(m.group(2))
+            dno = _pad3_digits(m.group(2))
             return f"{blok}-{dno}"
     return None
+
 
 def build_corner_label_overlay(
     page_w: float, page_h: float, label_text: str,
@@ -351,6 +368,7 @@ def build_corner_label_overlay(
     can.save()
     packet.seek(0)
     return packet
+
 
 def add_footer_and_stamp_per_page(
     src_bytes: bytes,
@@ -425,7 +443,7 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
         re.compile(r"([A-Z]\d)[^\d\n\r]{0,30}DA[İI]RE[^0-9]{0,10}(\d{1,4})"),
     ]
     re_odenecek = re.compile(r"(?:ÖDENECEK|ODENECEK)\s*TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
-    re_toplam   = re.compile(r"TOPLAM\s+TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
+    re_toplam = re.compile(r"TOPLAM\s+TUTAR[^0-9]{0,10}([0-9\.\,]+)", re.IGNORECASE)
 
     def find_daire_id(raw_text: str) -> Optional[str]:
         norm = _normalize_tr(raw_text)
@@ -459,7 +477,7 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
             continue
 
         isitma = grab_section_amount(norm, "ISITMA")
-        sicak  = grab_section_amount(norm, "SICAK SU")
+        sicak = grab_section_amount(norm, "SICAK SU")
 
         # SU başlığı SICAK SU ile karışmasın:
         su = 0.0
@@ -488,16 +506,19 @@ def parse_manas_pdf_totals(pdf_bytes: bytes) -> Dict[str, Dict[str, float]]:
 # -----------------------------------------------------------------------------
 def _norm_cols(s: str) -> str:
     return (str(s).strip().lower()
-            .replace("\n"," ").replace("\r"," ")
-            .replace(".","").replace("_"," ").replace("-"," "))
+            .replace("\n", " ").replace("\r", " ")
+            .replace(".", "").replace("_", " ").replace("-", " "))
+
 
 def _pad3_aps(x) -> str:
     try:
-        n = int(str(x).strip());  return f"{n:03d}"
+        n = int(str(x).strip())
+        return f"{n:03d}"
     except:
         s = str(x).strip()
         nums = "".join([ch for ch in s if ch.isdigit()])
         return f"{int(nums):03d}" if nums else s
+
 
 def _find_header_row(df_raw: pd.DataFrame) -> Optional[int]:
     limit = min(15, len(df_raw))
@@ -507,6 +528,7 @@ def _find_header_row(df_raw: pd.DataFrame) -> Optional[int]:
         if ("blok" in row_text) and (("daire no" in row_text) or ("daire" in row_text)):
             return i
     return None
+
 
 def _rename_apsiyon_cols(df: pd.DataFrame) -> pd.DataFrame:
     mapping = {}
@@ -529,10 +551,11 @@ def _rename_apsiyon_cols(df: pd.DataFrame) -> pd.DataFrame:
         elif "gider3 açıklaması" in nc or "gider 3 aciklamasi" in nc or "gider3 aciklamasi" in nc:
             mapping[c] = "Gider3 Açıklaması"
     df2 = df.rename(columns=mapping)
-    for col in ["Gider1 Tutarı","Gider1 Açıklaması","Gider2 Tutarı","Gider2 Açıklaması","Gider3 Tutarı","Gider3 Açıklaması"]:
+    for col in ["Gider1 Tutarı", "Gider1 Açıklaması", "Gider2 Tutarı", "Gider2 Açıklaması", "Gider3 Tutarı", "Gider3 Açıklaması"]:
         if col not in df2.columns:
             df2[col] = None
     return df2
+
 
 def load_apsiyon_template(excel_bytes: bytes) -> pd.DataFrame:
     from io import BytesIO
@@ -548,6 +571,7 @@ def load_apsiyon_template(excel_bytes: bytes) -> pd.DataFrame:
         st.dataframe(df.head(10))
         raise ValueError("Apsiyon şablonunda 'Blok' / 'Daire No' başlıkları tespit edilemedi.")
     return df
+
 
 def fill_expenses_to_apsiyon(
     df_in: pd.DataFrame,
@@ -605,6 +629,7 @@ def fill_expenses_to_apsiyon(
 
     return df
 
+
 def export_excel_bytes(df_out: pd.DataFrame, summary: Optional[dict] = None) -> bytes:
     """
     Apsiyon çıktısını Excel'e yazar; varsa summary'yi ayrı bir sayfaya koyar.
@@ -625,8 +650,9 @@ def export_excel_bytes(df_out: pd.DataFrame, summary: Optional[dict] = None) -> 
 # -----------------------------------------------------------------------------
 def _norm_rehber(s: str) -> str:
     return (str(s).strip().lower()
-            .replace("\n"," ").replace("\r"," ")
-            .replace(".","").replace("_"," ").replace("-"," "))
+            .replace("\n", " ").replace("\r", " ")
+            .replace(".", "").replace("_", " ").replace("-", " "))
+
 
 def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Optional[int]:
     """
@@ -637,15 +663,16 @@ def _find_header_row_contacts(df_raw: pd.DataFrame, search_rows: int = 50) -> Op
     for i in range(limit):
         cells = [_norm_rehber(c) for c in list(df_raw.iloc[i].values)]
         row_text = " | ".join(cells)
-        has_blok  = "blok" in row_text or "block" in row_text
+        has_blok = "blok" in row_text or "block" in row_text
         has_daire = ("daire no" in row_text) or ("daire  no" in row_text) or ("daire" in row_text) \
                     or ("daireno" in row_text) or ("apartment" in row_text) or ("flat" in row_text)
-        has_tel   = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) \
-                    or ("telefon no" in row_text) or ("phone" in row_text) or ("mobile" in row_text)
+        has_tel = ("telefon" in row_text) or ("tel" in row_text) or ("gsm" in row_text) or ("cep" in row_text) \
+                  or ("telefon no" in row_text) or ("phone" in row_text) or ("mobile" in row_text)
         if has_blok and has_daire and has_tel:
             return i
     # Esnek davran: bulamazsa 0 kabul et (çoğu CSV zaten ilk satır başlık)
     return 0
+
 
 def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -660,14 +687,14 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     norm_map = {_norm_rehber(c): c for c in original_cols}
 
     # Basit CSV şeması mı? (phone + daire_id)
-    has_phone    = any(k in norm_map for k in ["phone","mobile","telefon","tel","gsm","cep","telefon no"])
-    has_daire_id = any(k in norm_map for k in ["daire id","daireid","daireid ","daire_id"])
+    has_phone = any(k in norm_map for k in ["phone", "mobile", "telefon", "tel", "gsm", "cep", "telefon no"])
+    has_daire_id = any(k in norm_map for k in ["daire id", "daireid", "daireid ", "daire_id"])
     if has_phone and has_daire_id:
-        c_phone    = norm_map.get("phone") or norm_map.get("mobile") or norm_map.get("telefon") \
-                     or norm_map.get("tel") or norm_map.get("gsm") or norm_map.get("cep") or norm_map.get("telefon no")
+        c_phone = norm_map.get("phone") or norm_map.get("mobile") or norm_map.get("telefon") \
+                  or norm_map.get("tel") or norm_map.get("gsm") or norm_map.get("cep") or norm_map.get("telefon no")
         c_daire_id = norm_map.get("daire id") or norm_map.get("daireid") or norm_map.get("daireid ") or norm_map.get("daire_id")
-        c_name     = norm_map.get("name") or norm_map.get("ad soyad") or norm_map.get("ad soyad  unvan") \
-                     or norm_map.get("ad soyad/unvan") or norm_map.get("unvan")
+        c_name = norm_map.get("name") or norm_map.get("ad soyad") or norm_map.get("ad soyad  unvan") \
+                 or norm_map.get("ad soyad/unvan") or norm_map.get("unvan")
 
         # Yeni DataFrame’i oluştur
         tmp = pd.DataFrame()
@@ -676,7 +703,7 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
         tmp["DaireID"] = df[c_daire_id].astype(str)
 
         # DaireID → Blok ve Daire No çıkar
-        def _split_did(val: str) -> Tuple[str,str]:
+        def _split_did(val: str) -> Tuple[str, str]:
             s = str(val).strip()
             m = (re.search(r"([A-Za-z]\d)\s*[-_ ]\s*(\d{1,3})", s)
                  or re.search(r"([A-Za-z]\d).*?(\d{3})", s)
@@ -691,45 +718,52 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
             return blok, dno
 
         tmp["Blok"], tmp["Daire No"] = zip(*tmp["DaireID"].map(_split_did))
+
         # Telefonu normalize et
         def _quick_norm_phone(x: str) -> str:
             s = re.sub(r"[^\d+]", "", str(x))
-            if s.startswith("+"):                return s
-            if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
-            if re.fullmatch(r"5\d{9}", s):       return "+90" + s
-            if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
-            if re.fullmatch(r"90\d{10}", s):     return "+" + s
+            if s.startswith("+"):
+                return s
+            if re.fullmatch(r"05\d{9}", s):
+                return "+90" + s[1:]
+            if re.fullmatch(r"5\d{9}", s):
+                return "+90" + s
+            if re.fullmatch(r"0\d{10,11}", s):
+                return "+90" + s[1:]
+            if re.fullmatch(r"90\d{10}", s):
+                return "+" + s
             return s
+
         tmp["Telefon"] = tmp["Telefon"].apply(_quick_norm_phone)
 
         # Eksik olanları kontrol edip final döndür
         if "Ad Soyad / Unvan" not in tmp.columns:
             tmp["Ad Soyad / Unvan"] = None
         tmp["Blok"] = tmp["Blok"].astype(str).str.upper().str.strip()
-        tmp["Daire No"] = tmp["Daire No"].astype(str).str.replace(r"\D","", regex=True).str.zfill(3)
+        tmp["Daire No"] = tmp["Daire No"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(3)
         tmp["DaireID"] = tmp["Blok"] + "-" + tmp["Daire No"]
-        return tmp[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
+        return tmp[["Blok", "Daire No", "Ad Soyad / Unvan", "Telefon", "DaireID"]]
 
     # Apsiyon şeması (TR/EN çeşitleri) — esnek eşleme
     mapping = {}
     for c in original_cols:
         nc = _norm_rehber(c)
-        if nc in ("blok","blok adi","blok adı","blokadi","blok ad","blokad","block"):
+        if nc in ("blok", "blok adi", "blok adı", "blokadi", "blok ad", "blokad", "block"):
             mapping[c] = "Blok"
-        elif nc in ("daire no","daire  no","daireno","daire","apartment","flat","apt no","apartment no","unit","unit no"):
+        elif nc in ("daire no", "daire  no", "daireno", "daire", "apartment", "flat", "apt no", "apartment no", "unit", "unit no"):
             mapping[c] = "Daire No"
         elif ("ad soyad / unvan" in nc) or ("ad soyad/unvan" in nc) or ("ad soyad" in nc) or ("unvan" in nc) or (nc == "name") or ("full name" in nc):
             mapping[c] = "Ad Soyad / Unvan"
-        elif (nc in ("telefon","tel","cep","gsm","telefon no","tel no","telefon numarasi","telefon numarası","phone","mobile")) or ("telefon no" in nc):
+        elif (nc in ("telefon", "tel", "cep", "gsm", "telefon no", "tel no", "telefon numarasi", "telefon numarası", "phone", "mobile")) or ("telefon no" in nc):
             mapping[c] = "Telefon"
-        elif nc in ("daire id","daireid","daire id ","daire_id"):
+        elif nc in ("daire id", "daireid", "daire id ", "daire_id"):
             mapping[c] = "DaireID"
 
     df2 = df.rename(columns=mapping)
 
     # Eğer DaireID var ve Blok/Daire No yoksa parçala
     if "DaireID" in df2.columns and (("Blok" not in df2.columns) or ("Daire No" not in df2.columns)):
-        def _split_did2(val: str) -> Tuple[str,str]:
+        def _split_did2(val: str) -> Tuple[str, str]:
             s = str(val).strip()
             m = (re.search(r"([A-Za-z]\d)\s*[-_ ]\s*(\d{1,3})", s)
                  or re.search(r"([A-Za-z]\d).*?(\d{3})", s)
@@ -742,16 +776,16 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
             except:
                 dno = str(m.group(2)).zfill(3)
             return blok, dno
+
         blk, dno = zip(*df2["DaireID"].map(_split_did2))
         df2["Blok"] = df2.get("Blok", pd.Series(blk)).fillna(blk)
         df2["Daire No"] = df2.get("Daire No", pd.Series(dno)).fillna(dno)
 
     # Zorunlu kolonlar
-    for need in ["Blok","Daire No","Telefon"]:
+    for need in ["Blok", "Daire No", "Telefon"]:
         if need not in df2.columns:
-            # Basit hata gösterimi için aynı uyarı metnini kullanalım
             cols_map_debug = {c: _norm_rehber(c) for c in df.columns}
-            st.error(f"Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
+            st.error("Rehberde zorunlu kolon(lar) eksik: Blok, Daire No, Telefon")
             st.write("Algılanan kolonlar (normalize):", cols_map_debug)
             raise ValueError("Apsiyon rehber başlık eşlemesi yapılamadı.")
 
@@ -762,11 +796,16 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     def _quick_norm_phone(x: str) -> str:
         s = re.sub(r"[^\d+]", "", str(x))
-        if s.startswith("+"):                return s
-        if re.fullmatch(r"05\d{9}", s):      return "+90" + s[1:]
-        if re.fullmatch(r"5\d{9}", s):       return "+90" + s
-        if re.fullmatch(r"0\d{10,11}", s):   return "+90" + s[1:]
-        if re.fullmatch(r"90\d{10}", s):     return "+" + s
+        if s.startswith("+"):
+            return s
+        if re.fullmatch(r"05\d{9}", s):
+            return "+90" + s[1:]
+        if re.fullmatch(r"5\d{9}", s):
+            return "+90" + s
+        if re.fullmatch(r"0\d{10,11}", s):
+            return "+90" + s[1:]
+        if re.fullmatch(r"90\d{10}", s):
+            return "+" + s
         return s
 
     if "Ad Soyad / Unvan" not in df2.columns:
@@ -777,7 +816,8 @@ def _map_contact_columns(df: pd.DataFrame) -> pd.DataFrame:
     df2["Telefon"] = df2["Telefon"].apply(_quick_norm_phone)
     df2["DaireID"] = df2["Blok"] + "-" + df2["Daire No"]
 
-    return df2[["Blok","Daire No","Ad Soyad / Unvan","Telefon","DaireID"]]
+    return df2[["Blok", "Daire No", "Ad Soyad / Unvan", "Telefon", "DaireID"]]
+
 
 def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """
@@ -838,103 +878,73 @@ def _ok_number(s: str) -> str:
         return "+90" + s[1:]
     if s.startswith("5") and len(s) == 10:
         return "+90" + s
-    if s.startswith("0") and len(s) in (10,11):
+    if s.startswith("0") and len(s) in (10, 11):
         return "+90" + s[1:]
     return s
 
-def send_template(access_token: str, phone_id: str, to: str,
-                  t_name: str, lang: str,
-                  name: str, daire_id: str, file_url: str,
-                  header_doc=False):
+
+def send_template(
+    access_token: str,
+    phone_id: str,
+    to: str,
+    t_name: str,
+    lang: str,
+    name: str,
+    daire_id: str,
+    file_url: str,
+    header_doc: bool = False
+):
+    """
+    WhatsApp template mesajı gönderir.
+
+    - 'fatura_goruntule' / 'fatura_goruntule_btn' şablonları:
+        BODY:  {{1}} = isim, {{2}} = daire_id
+        BUTTON URL: {{1}} = file_url
+    - Diğer şablonlar:
+        BODY: {{1}} = isim, {{2}} = daire_id, {{3}} = file_url
+    """
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
-    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
 
     components = []
-t_lower = (t_name or "").lower()
+    t_lower = (t_name or "").lower()
 
-# BUTONLU yeni şablonlar (body'de 2 değişken, butonda 1 değişken)
-if t_lower in ("fatura_goruntule", "fatura_goruntule_btn"):
-
-    # BODY: {{1}} = isim, {{2}} = daire_id
-    components.append({
-        "type": "body",
-        "parameters": [
-            {"type": "text", "text": name or ""},
-            {"type": "text", "text": daire_id or ""}
-        ]
-    })
-
-    # BUTON URL: {{1}} = file_url
-    components.append({
-        "type": "button",
-        "sub_type": "url",
-        "index": "0",
-        "parameters": [
-            {"type": "text", "text": file_url or ""}
-        ]
-    })
-
-else:
-    # BUTON URL encode edilmesi gerekiyor mu?
-    if new_template_type == "button":
-        encoded_for_button = quote_plus(file_url or "")
-        components.append({
-            "type": "button",
-            "sub_type": "url",
-            "index": "0",
-            "parameters": [
-                {"type": "text", "text": encoded_for_button}
-            ]
-        })
-    else:
-        # ESKİ tip şablonlar (body'de 3 değişken: {{1}}, {{2}}, {{3}})
+    # BUTONLU yeni şablonlar (body'de 2 değişken, butonda 1 değişken)
+    if t_lower in ("fatura_goruntule", "fatura_goruntule_btn"):
+        # BODY: {{1}} = isim, {{2}} = daire_id
         components.append({
             "type": "body",
             "parameters": [
                 {"type": "text", "text": name or ""},
                 {"type": "text", "text": daire_id or ""},
-                {"type": "text", "text": file_url or ""}
-            ]
+            ],
         })
 
-# HEADER document kısmını aynı bırak
-if header_doc and file_url:
-    components.insert(0, {
-        "type": "header",
-        "parameters": [
-            {
-                "type": "document",
-                "document": {
-                    "link": file_url,
-                    "filename": f"{daire_id or 'Dosya'}.pdf"
-                }
-            }
-        ]
-    })                {
-                    "type": "document",
-                    "document": {
-                        "link": file_url,
-                        "filename": f"{daire_id or 'Dosya'}.pdf"
-                    }
-                }
-            ]
+        # BUTTON URL: {{1}} = file_url
+        components.append({
+            "type": "button",
+            "sub_type": "url",
+            "index": "0",
+            "parameters": [
+                {"type": "text", "text": file_url or ""},
+            ],
         })
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "template",
-        "template": {
-            "name": t_name,
-            "language": {"code": lang},
-            "components": components
-        }
-    }
+    else:
+        # Eski tip şablonlar (BODY'de 3 değişken: {{1}}, {{2}}, {{3}})
+        components.append({
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": name or ""},
+                {"type": "text", "text": daire_id or ""},
+                {"type": "text", "text": file_url or ""},
+            ],
+        })
 
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    return r
-
-    # HEADER document varsa (şablonda HEADER: DOCUMENT tanımlı ise)
+    # HEADER document (şablonda HEADER: DOCUMENT varsa)
     if header_doc and file_url:
         components.insert(0, {
             "type": "header",
@@ -943,10 +953,10 @@ if header_doc and file_url:
                     "type": "document",
                     "document": {
                         "link": file_url,
-                        "filename": f"{daire_id or 'Dosya'}.pdf"
-                    }
+                        "filename": f"{daire_id or 'Dosya'}.pdf",
+                    },
                 }
-            ]
+            ],
         })
 
     payload = {
@@ -956,8 +966,8 @@ if header_doc and file_url:
         "template": {
             "name": t_name,
             "language": {"code": lang},
-            "components": components
-        }
+            "components": components,
+        },
     }
 
     r = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -975,6 +985,7 @@ def send_text(access_token: str, phone_id: str, to: str, text: str):
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     return r
+
 
 def send_document_msg(access_token: str, phone_id: str, to: str, file_url: str, caption: str):
     url = f"https://graph.facebook.com/v20.0/{phone_id}/messages"
@@ -1027,7 +1038,12 @@ with tab_a:
     )
 
     with t1:
-        footer_text = st.text_area("Alt yazı (kalın yapmak istediğiniz kelimenin başına ve sonuna ** hem büyük hem kalın yapmak istiyorsanız *** koyunuz )", value=default_text, height=220, key="footer_text")
+        footer_text = st.text_area(
+            "Alt yazı (kalın yapmak istediğiniz kelimenin başına ve sonuna ** hem büyük hem kalın yapmak istiyorsanız *** koyunuz )",
+            value=default_text,
+            height=220,
+            key="footer_text"
+        )
 
     with t2:
         if not HAS_DOCX:
@@ -1048,11 +1064,11 @@ with tab_a:
     c1, c2 = st.columns(2)
     with c1:
         font_size = st.slider("🅰️ Yazı Boyutu", 9, 16, 11, key="fs")
-        leading   = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14, key="lead")
+        leading = st.slider("↕️ Satır Aralığı (pt)", 12, 22, 14, key="lead")
     with c2:
-        align     = st.radio("Hizalama", ["left", "center"], index=0, key="align",
-                             format_func=lambda x: "Sol" if x=="left" else "Orta")
-        bottom_m  = st.slider("Alt Marj (pt)", 24, 100, 48, key="bm")
+        align = st.radio("Hizalama", ["left", "center"], index=0, key="align",
+                         format_func=lambda x: "Sol" if x == "left" else "Orta")
+        bottom_m = st.slider("Alt Marj (pt)", 24, 100, 48, key="bm")
     box_h = st.slider("Alt Yazı Alanı Yüksekliği (pt)", 100, 260, 180, key="bh")
     bold_rules = st.checkbox("Başlıkları otomatik kalın yap (SON ÖDEME, AÇIKLAMA, ...)",
                              value=True, key="boldrules")
@@ -1210,8 +1226,6 @@ with tab_b:
 
         # 3) PDF toplamını (artık dairelere eklenmiş haliyle) hesapla
         pdf_total = sum(v.get("toplam", 0.0) for v in totals_map.values())
-        # Burada "extra" zaten her dairenin toplamına işlendi, o yüzden ayrıca grand_total
-        # hesabında tekrar toplama yapmıyoruz; pdf_total zaten güncel hali.
         grand_total = pdf_total
 
         st.info(
@@ -1245,6 +1259,7 @@ with tab_b:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="dl_aps",
         )
+
 # ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
 with tab_c:
     st.markdown("""
@@ -1261,19 +1276,19 @@ with tab_c:
 
     # --- Yol 1: ZIP + Base URL (mevcut akış) ---
     with wa_tab1:
-        up1, up2 = st.columns([1,1], vertical_alignment="top")
+        up1, up2 = st.columns([1, 1], vertical_alignment="top")
         with up1:
             st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
             zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip", label_visibility="collapsed")
         with up2:
             st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (Apsiyon ham Excel/CSV).")
-            rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx","csv"], key="wa_rehber", label_visibility="collapsed")
+            rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx", "csv"], key="wa_rehber", label_visibility="collapsed")
 
         with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
             base_url = st.text_input("Base URL (örn: https://cdn.site.com/faturalar/ )",
                                      value="", key="wa_base")
 
-        ctop1, ctop2 = st.columns([1,3], vertical_alignment="center")
+        ctop1, ctop2 = st.columns([1, 3], vertical_alignment="center")
         with ctop1:
             go_btn = st.button("📑 Eşleştir ve CSV oluştur", use_container_width=True, key="wa_go")
         with ctop2:
@@ -1292,7 +1307,7 @@ with tab_c:
                 for info in zf.infolist():
                     if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
                         continue
-                    base = info.filename.rsplit("/",1)[-1].rsplit("\\",1)[-1]
+                    base = info.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
                     m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
@@ -1318,7 +1333,7 @@ with tab_c:
 
             # Eşleştirme
             merged = pdf_df.merge(
-                rehber_df[["DaireID","Telefon","Ad Soyad / Unvan"]],
+                rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
                 on="DaireID",
                 how="left"
             )
@@ -1327,13 +1342,16 @@ with tab_c:
             )
 
             a1, a2, a3 = st.columns(3)
-            with a1: st.metric("Toplam kayıt", len(merged))
-            with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-            with a3: st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+            with a1:
+                st.metric("Toplam kayıt", len(merged))
+            with a2:
+                st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+            with a3:
+                st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"] == "")).sum()))
 
             st.markdown("**Eşleştirme Önizleme**")
             st.dataframe(
-                merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                merged.rename(columns={"Telefon": "phone", "Ad Soyad / Unvan": "name"}),
                 use_container_width=True, height=600
             )
 
@@ -1343,7 +1361,7 @@ with tab_c:
                 "DaireID": "daire_id",
                 "file_name": "file_name",
                 "file_url": "file_url",
-            })[["phone","name","daire_id","file_name","file_url"]]
+            })[["phone", "name", "daire_id", "file_name", "file_url"]]
             b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
             st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv,
                                file_name="WhatsApp_Recipients.csv",
@@ -1366,7 +1384,7 @@ with tab_c:
 
             rehber_up2 = st.file_uploader(
                 "Rehber (XLSX/CSV) — Apsiyon ham dosya",
-                type=["xlsx","csv"], key="wa_rehber2"
+                type=["xlsx", "csv"], key="wa_rehber2"
             )
 
             link_mode = st.radio(
@@ -1404,7 +1422,7 @@ with tab_c:
                 # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
                 pdf_rows = []
                 for f in gfiles:
-                    base = f.get("name","")
+                    base = f.get("name", "")
                     m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
                          or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
@@ -1448,14 +1466,17 @@ with tab_c:
 
                 # 7) Önizleme + CSV
                 a1, a2, a3 = st.columns(3)
-                with a1: st.metric("Toplam kayıt", len(merged))
-                with a2: st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-                with a3: st.metric("Telefon eksik",
-                                   int((merged["Telefon"].isna() | (merged["Telefon"]=="")).sum()))
+                with a1:
+                    st.metric("Toplam kayıt", len(merged))
+                with a2:
+                    st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
+                with a3:
+                    st.metric("Telefon eksik",
+                              int((merged["Telefon"].isna() | (merged["Telefon"] == "")).sum()))
 
                 st.markdown("**Eşleştirme Önizleme**")
                 st.dataframe(
-                    merged.rename(columns={"Telefon":"phone", "Ad Soyad / Unvan":"name"}),
+                    merged.rename(columns={"Telefon": "phone", "Ad Soyad / Unvan": "name"}),
                     use_container_width=True, height=600
                 )
 
@@ -1465,7 +1486,7 @@ with tab_c:
                     "DaireID": "daire_id",
                     "file_name": "file_name",
                     "file_url": "file_url",
-                })[["phone","name","daire_id","file_name","file_url"]]
+                })[["phone", "name", "daire_id", "file_name", "file_url"]]
                 b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
                     "📥 WhatsApp_Recipients.csv (Drive linkli)",
@@ -1554,7 +1575,7 @@ with tab_w:
             st.error("Access Token ve Phone Number ID gerekir."); st.stop()
 
         df = pd.read_csv(csv_up, dtype=str).fillna("")
-        required_cols = {"phone","name","daire_id","file_url"}
+        required_cols = {"phone", "name", "daire_id", "file_url"}
         if not required_cols.issubset(set(df.columns)):
             st.error("CSV kolonları eksik. Gerekli: phone, name, daire_id, file_url")
             st.stop()
@@ -1567,9 +1588,9 @@ with tab_w:
 
         for i, row in df.iterrows():
             to = _ok_number(row.get("phone", ""))
-            name = row.get("name","")
-            did  = row.get("daire_id","")
-            furl = row.get("file_url","")
+            name = row.get("name", "")
+            did = row.get("daire_id", "")
+            furl = row.get("file_url", "")
 
             # 1) Şablonla başlat
             try:
@@ -1591,7 +1612,7 @@ with tab_w:
 
             send_results.append({"to": to, "step": "template", "ok": success, "info": info})
             success_cnt += 1 if success else 0
-            fail_cnt    += 0 if success else 1
+            fail_cnt += 0 if success else 1
 
             if success:
                 time.sleep(0.4)
@@ -1619,7 +1640,7 @@ with tab_w:
                     })
                     time.sleep(0.3)
 
-            progress.progress((i+1)/total)
+            progress.progress((i+1) / total)
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
