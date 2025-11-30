@@ -872,6 +872,7 @@ components.append({
     ]
 })
     else:
+        
        # BUTON URL: {{1}} = ENCODE EDİLMİŞ file_url
     if new_template_type == "button":
     encoded_for_button = quote_plus(file_url or "")
