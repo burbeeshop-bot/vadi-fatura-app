@@ -1487,7 +1487,7 @@ with tab_w:
     st.markdown("#### Şablonla Başlat (zorunlu ilk mesaj)")
     colT1, colT2, colT3 = st.columns(3)
     with colT1:
-        template_name = st.text_input("Template adı", value="fatura_bildirimi")
+        template_name = st.text_input("Template adı", value="fatura_goruntule_btn")
     with colT2:
         template_lang = st.text_input("Dil (BCP-47)", value="tr")
     with colT3:
