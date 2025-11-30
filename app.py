@@ -850,10 +850,11 @@ def send_template(access_token: str, phone_id: str, to: str,
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
     components = []
+    t_lower = (t_name or "").lower()
 
-    # Eğer butonlu şablonumuz "fatura_goruntule" ise:
-    if t_name == "fatura_goruntule":
-        # BODY'de sadece {{1}} ve {{2}} var
+    # BUTONLU yeni şablonlar (body'de 2 değişken, butonda 1 değişken)
+    if t_lower in ("fatura_goruntule", "fatura_goruntule_btn"):
+        # BODY: {{1}} = isim, {{2}} = daire_id
         components.append({
             "type": "body",
             "parameters": [
@@ -861,7 +862,7 @@ def send_template(access_token: str, phone_id: str, to: str,
                 {"type": "text", "text": daire_id or ""},
             ]
         })
-        # URL butonu için {{3}} parametresi
+        # BUTON URL: {{1}} = file_url
         components.append({
             "type": "button",
             "sub_type": "url",
@@ -871,7 +872,7 @@ def send_template(access_token: str, phone_id: str, to: str,
             ]
         })
     else:
-        # Eski 3 değişkenli şablonlar için (BODY'de {{1}}, {{2}}, {{3}})
+        # ESKİ tip şablonlar (body'de 3 değişken: {{1}}, {{2}}, {{3}})
         components.append({
             "type": "body",
             "parameters": [
@@ -880,6 +881,35 @@ def send_template(access_token: str, phone_id: str, to: str,
                 {"type": "text", "text": file_url or ""},
             ]
         })
+
+    # HEADER document kısmını aynı bırak
+    if header_doc and file_url:
+        components.insert(0, {
+            "type": "header",
+            "parameters": [
+                {
+                    "type": "document",
+                    "document": {
+                        "link": file_url,
+                        "filename": f"{daire_id or 'Dosya'}.pdf"
+                    }
+                }
+            ]
+        })
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "template",
+        "template": {
+            "name": t_name,
+            "language": {"code": lang},
+            "components": components
+        }
+    }
+
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    return r
 
     # HEADER document varsa (şablonda HEADER: DOCUMENT tanımlı ise)
     if header_doc and file_url:
