@@ -872,15 +872,28 @@ components.append({
     ]
 })
     else:
-        # ESKİ tip şablonlar (body'de 3 değişken: {{1}}, {{2}}, {{3}})
-        components.append({
-            "type": "body",
-            "parameters": [
-                {"type": "text", "text": name or ""},
-                {"type": "text", "text": daire_id or ""},
-                {"type": "text", "text": file_url or ""},
-            ]
-        })
+       # BUTON URL: {{1}} = ENCODE EDİLMİŞ file_url
+    if new_template_type == "button":
+    encoded_for_button = quote_plus(file_url or "")
+    components.append({
+        "type": "button",
+        "sub_type": "url",
+        "index": "0",
+        "parameters": [
+            {"type": "text", "text": encoded_for_button}
+        ]
+    })
+
+    else:
+    # ESKİ tip şablonlar (body'de 3 değişken: {{1}}, {{2}}, {{3}})
+    components.append({
+        "type": "body",
+        "parameters": [
+            {"type": "text", "text": name or ""},
+            {"type": "text", "text": daire_id or ""},
+            {"type": "text", "text": file_url or ""}
+        ]
+    })
 
     # HEADER document kısmını aynı bırak
     if header_doc and file_url:
