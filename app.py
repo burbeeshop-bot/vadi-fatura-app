@@ -866,7 +866,7 @@ def load_contacts_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # Google Drive vars
 # -----------------------------------------------------------------------------
-DEFAULT_DRIVE_FOLDER_ID = "1QTVqRbxim9OxsSOD33uvesQg2dUO2r2n"
+DEFAULT_DRIVE_FOLDER_ID = "1llFZbn_1769tun1v7Otehfg3_SfAotcQ"
 
 # -----------------------------------------------------------------------------
 # WhatsApp API helper'ları
