@@ -1004,12 +1004,11 @@ def send_document_msg(access_token: str, phone_id: str, to: str, file_url: str, 
 # -----------------------------------------------------------------------------
 st.title("🧾 Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_w, tab_r = st.tabs([
+tab_a, tab_b, tab_c, tab_w = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
     "📤 WhatsApp Gönderim Hazırlığı",
-    "📲 WhatsApp Gönder (Cloud API)",
-    "📑 Gelir-Gider Raporu (PDF)"
+    "📲 WhatsApp Gönder (Cloud API)"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
@@ -1260,7 +1259,7 @@ with tab_b:
             key="dl_aps",
         )
 
-# ---------------- TAB C: WhatsApp Gönderim Hazırlığı ----------------
+# ---------------- TAB C: WhatsApp Gönderim Hazırlığı (sade) ----------------
 with tab_c:
     st.markdown("""
     <div style='background-color:#25D366;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:10px;color:white;margin-bottom:15px;'>
@@ -1269,85 +1268,109 @@ with tab_c:
     </div>
     """, unsafe_allow_html=True)
 
-    wa_tab1, wa_tab2 = st.tabs([
-        "ZIP + (opsiyonel) Base URL",
-        "Google Drive klasöründen link üret"
-    ])
+    st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
 
-    # --- Yol 1: ZIP + Base URL (mevcut akış) ---
-    with wa_tab1:
-        up1, up2 = st.columns([1, 1], vertical_alignment="top")
-        with up1:
-            st.markdown("**Adım 1:** Bölünmüş PDF’lerin olduğu **ZIP**’i yükle (dosya adları `A1-001.pdf` gibi).")
-            zip_up = st.file_uploader("Bölünmüş PDF ZIP", type=["zip"], key="wa_zip", label_visibility="collapsed")
-        with up2:
-            st.markdown("**Adım 2:** Güncel **Rehber** dosyasını yükle (Apsiyon ham Excel/CSV).")
-            rehber_up = st.file_uploader("Rehber (XLSX/CSV)", type=["xlsx", "csv"], key="wa_rehber", label_visibility="collapsed")
+    if not _GDRIVE_OK:
+        st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\n"
+                 "pip install google-api-python-client google-auth google-auth-oauthlib")
+    else:
+        folder_id = st.text_input(
+            "Drive Folder ID",
+            value=DEFAULT_DRIVE_FOLDER_ID,
+            help="Klasör ID: 1QTVqRbxim9OxsSOD33uvesQg2dUO2r2n"
+        )
 
-        with st.expander("🔗 Opsiyonel link üretimi (base URL)", expanded=False):
-            base_url = st.text_input("Base URL (örn: https://cdn.site.com/faturalar/ )",
-                                     value="", key="wa_base")
+        rehber_up2 = st.file_uploader(
+            "Rehber (XLSX/CSV) — Apsiyon ham dosya",
+            type=["xlsx", "csv"], key="wa_rehber2"
+        )
 
-        ctop1, ctop2 = st.columns([1, 3], vertical_alignment="center")
-        with ctop1:
-            go_btn = st.button("📑 Eşleştir ve CSV oluştur", use_container_width=True, key="wa_go")
-        with ctop2:
-            st.caption("Butona bastıktan sonra aşağıda önizleme ve indirme butonu görünür.")
+        link_mode = st.radio(
+            "Link tipi",
+            ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
+            horizontal=True
+        )
 
-        if go_btn:
-            if not zip_up:
-                st.warning("Önce ZIP yükleyin."); st.stop()
-            if not rehber_up:
-                st.warning("Önce Rehber dosyası yükleyin."); st.stop()
+        drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret",
+                             use_container_width=True)
 
-            # ZIP → PDF listesi + DaireID çıkar
+        if drive_go:
+            if not folder_id.strip():
+                st.error("Folder ID boş olamaz."); st.stop()
+            if not rehber_up2:
+                st.error("Rehber dosyası yükleyin."); st.stop()
+
+            # 1) Drive servisine bağlan (Secrets)
             try:
-                zf = zipfile.ZipFile(zip_up)
-                pdf_rows = []
-                for info in zf.infolist():
-                    if info.is_dir() or (not info.filename.lower().endswith(".pdf")):
-                        continue
-                    base = info.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-                    m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
-                         or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
-                         or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
-                    daire_id = None
-                    if m:
-                        try:
-                            daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
-                        except:
-                            daire_id = f"{m.group(1).upper()}-{m.group(2)}"
-                    pdf_rows.append({"file_name": base, "DaireID": daire_id})
-                pdf_df = pd.DataFrame(pdf_rows)
+                service = get_drive_service_from_secrets()
             except Exception as e:
-                st.error(f"ZIP okunamadı: {e}"); st.stop()
+                st.error(f"Drive servisine bağlanılamadı: {e}")
+                st.stop()
 
-            if pdf_df.empty:
-                st.error("ZIP’te PDF bulunamadı."); st.stop()
-
-            # Rehber oku
+            # 2) Klasördeki PDF'leri çek
             try:
-                rehber_df = load_contacts_any(rehber_up.read(), rehber_up.name)
+                gfiles = list_pdfs_in_folder(service, folder_id.strip())
+            except Exception as e:
+                st.error(f"Klasör listelenemedi: {e}")
+                st.stop()
+
+            if not gfiles:
+                st.warning("Klasörde PDF bulunamadı."); st.stop()
+
+            # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
+            pdf_rows = []
+            for f in gfiles:
+                base = f.get("name", "")
+                m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
+                     or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
+                daire_id = None
+                if m:
+                    try:
+                        daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
+                    except:
+                        daire_id = f"{m.group(1).upper()}-{m.group(2)}"
+                pdf_rows.append({"file_name": base,
+                                 "DaireID": daire_id,
+                                 "file_id": f["id"]})
+            pdf_df = pd.DataFrame(pdf_rows)
+
+            # 4) Rehberi oku
+            try:
+                rehber_df = load_contacts_any(rehber_up2.read(), rehber_up2.name)
             except Exception as e:
                 st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
 
-            # Eşleştirme
+            # 5) Eşleştir
             merged = pdf_df.merge(
                 rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
                 on="DaireID",
                 how="left"
             )
-            merged["file_url"] = merged["file_name"].apply(
-                lambda fn: (base_url.rstrip("/") + "/" + fn) if base_url and base_url.strip() else ""
-            )
 
+            # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
+            link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
+
+            st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
+            for i, row in merged.iterrows():
+                fid = row.get("file_id")
+                if not fid:
+                    continue
+                try:
+                    ensure_anyone_with_link_permission(service, fid)
+                except Exception:
+                    pass
+                merged.at[i, "file_url"] = build_direct_file_link(fid, link_kind)
+
+            # 7) Önizleme + CSV
             a1, a2, a3 = st.columns(3)
             with a1:
                 st.metric("Toplam kayıt", len(merged))
             with a2:
                 st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
             with a3:
-                st.metric("Telefon eksik", int((merged["Telefon"].isna() | (merged["Telefon"] == "")).sum()))
+                st.metric("Telefon eksik",
+                          int((merged["Telefon"].isna() | (merged["Telefon"] == "")).sum()))
 
             st.markdown("**Eşleştirme Önizleme**")
             st.dataframe(
@@ -1363,152 +1386,19 @@ with tab_c:
                 "file_url": "file_url",
             })[["phone", "name", "daire_id", "file_name", "file_url"]]
             b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("📥 WhatsApp_Recipients.csv (UTF-8, BOM)", b_csv,
-                               file_name="WhatsApp_Recipients.csv",
-                               mime="text/csv",
-                               use_container_width=True,
-                               key="dl_csv")
-
-    # --- Yol 2: Google Drive klasöründen PDF listele + tekil link üret ---
-    with wa_tab2:
-        st.markdown("**Bu yöntemde ZIP gerekmez.** PDF’leri Google Drive’daki klasöre koyman yeterli.")
-        if not _GDRIVE_OK:
-            st.error("Google Drive kütüphaneleri yüklü değil. Terminalde şunu kur:\n\n"
-                     "pip install google-api-python-client google-auth google-auth-oauthlib")
-        else:
-            folder_id = st.text_input(
-                "Drive Folder ID",
-                value=DEFAULT_DRIVE_FOLDER_ID,
-                help="Klasör ID: 1P8CZXb0G0RcNIe89CIyDASCborzmgSYF"
+            st.download_button(
+                "📥 WhatsApp_Recipients.csv (Drive linkli)",
+                b_csv,
+                file_name="WhatsApp_Recipients.csv",
+                mime="text/csv",
+                use_container_width=True
             )
-
-            rehber_up2 = st.file_uploader(
-                "Rehber (XLSX/CSV) — Apsiyon ham dosya",
-                type=["xlsx", "csv"], key="wa_rehber2"
-            )
-
-            link_mode = st.radio(
-                "Link tipi",
-                ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
-                horizontal=True
-            )
-
-            drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret",
-                                 use_container_width=True)
-
-            if drive_go:
-                if not folder_id.strip():
-                    st.error("Folder ID boş olamaz."); st.stop()
-                if not rehber_up2:
-                    st.error("Rehber dosyası yükleyin."); st.stop()
-
-                # 1) Drive servisine bağlan (Secrets)
-                try:
-                    service = get_drive_service_from_secrets()
-                except Exception as e:
-                    st.error(f"Drive servisine bağlanılamadı: {e}")
-                    st.stop()
-
-                # 2) Klasördeki PDF'leri çek
-                try:
-                    gfiles = list_pdfs_in_folder(service, folder_id.strip())
-                except Exception as e:
-                    st.error(f"Klasör listelenemedi: {e}")
-                    st.stop()
-
-                if not gfiles:
-                    st.warning("Klasörde PDF bulunamadı."); st.stop()
-
-                # 3) PDF adlarından DaireID tahmini (A1-001.pdf gibi)
-                pdf_rows = []
-                for f in gfiles:
-                    base = f.get("name", "")
-                    m = (re.search(r"([A-Za-z]\d)\s*[-_]\s*(\d{1,3})", base)
-                         or re.search(r"([A-Za-z]\d)\s+(\d{1,3})", base)
-                         or re.search(r"([A-Za-z]\d).*?(\d{3})", base))
-                    daire_id = None
-                    if m:
-                        try:
-                            daire_id = f"{m.group(1).upper()}-{int(m.group(2)):03d}"
-                        except:
-                            daire_id = f"{m.group(1).upper()}-{m.group(2)}"
-                    pdf_rows.append({"file_name": base,
-                                     "DaireID": daire_id,
-                                     "file_id": f["id"]})
-                pdf_df = pd.DataFrame(pdf_rows)
-
-                # 4) Rehberi oku
-                try:
-                    rehber_df = load_contacts_any(rehber_up2.read(), rehber_up2.name)
-                except Exception as e:
-                    st.error(f"Rehber okunamadı / eşlenemedi: {e}"); st.stop()
-
-                # 5) Eşleştir
-                merged = pdf_df.merge(
-                    rehber_df[["DaireID", "Telefon", "Ad Soyad / Unvan"]],
-                    on="DaireID",
-                    how="left"
-                )
-
-                # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
-                link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
-
-                st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
-                for i, row in merged.iterrows():
-                    fid = row.get("file_id")
-                    if not fid:
-                        continue
-                    try:
-                        ensure_anyone_with_link_permission(service, fid)
-                    except Exception:
-                        pass
-                    merged.at[i, "file_url"] = build_direct_file_link(fid, link_kind)
-
-                # 7) Önizleme + CSV
-                a1, a2, a3 = st.columns(3)
-                with a1:
-                    st.metric("Toplam kayıt", len(merged))
-                with a2:
-                    st.metric("DaireID bulunamadı", int(merged["DaireID"].isna().sum()))
-                with a3:
-                    st.metric("Telefon eksik",
-                              int((merged["Telefon"].isna() | (merged["Telefon"] == "")).sum()))
-
-                st.markdown("**Eşleştirme Önizleme**")
-                st.dataframe(
-                    merged.rename(columns={"Telefon": "phone", "Ad Soyad / Unvan": "name"}),
-                    use_container_width=True, height=600
-                )
-
-                out_csv = merged.rename(columns={
-                    "Telefon": "phone",
-                    "Ad Soyad / Unvan": "name",
-                    "DaireID": "daire_id",
-                    "file_name": "file_name",
-                    "file_url": "file_url",
-                })[["phone", "name", "daire_id", "file_name", "file_url"]]
-                b_csv = out_csv.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "📥 WhatsApp_Recipients.csv (Drive linkli)",
-                    b_csv,
-                    file_name="WhatsApp_Recipients.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-
-                with st.expander("📨 Örnek mesaj gövdesi", expanded=False):
-                    st.code(
-                        "Merhaba {name},\n"
-                        "{daire_id} numaralı dairenizin aylık bildirimi hazırdır.\n"
-                        "Dosyayı butondan görüntüleyebilirsiniz.\n",
-                        language="text"
-                    )
 
 # ---------------- TAB W: WhatsApp Gönder (Cloud API) ----------------
 with tab_w:
     st.markdown("### 📲 WhatsApp Gönder (Meta Cloud API)")
 
-    st.info("İlk mesajı **şablon** ile başlatmalısın. Sonrasında 24 saat içinde serbest metin / belge gönderebilirsin.")
+    st.info("Gönderim, onaylı bir **şablon mesaj** ile başlatılır. Bu ekranda sadece şablon gönderilir (ekstra metin / belge yok).")
 
     colK1, colK2 = st.columns(2)
     with colK1:
@@ -1543,23 +1433,8 @@ with tab_w:
 
     st.caption(
         "Örnek şablon gövdesi (Meta'da oluşturup onaylat):\n"
-        "Merhaba {{1}},\n{{2}} dairenizin bildirimi hazırdır.\nDosya: {{3}}"
+        "Merhaba {{1}},\n{{2}} dairenizin bildirimi hazırdır.\nButondan dosyayı görüntüleyebilirsiniz."
     )
-
-    st.markdown("#### 24 saat PENCERE AÇILDIKTAN SONRA opsiyonel mesaj")
-    colF1, colF2 = st.columns(2)
-    with colF1:
-        send_followup_text = st.checkbox("Ardından serbest metin gönder", value=False)
-        followup_text = st.text_area(
-            "Serbest metin",
-            value="Merhaba {name},\n{daire_id} dairenizin PDF bildirimi ektedir:\n{file_url}"
-        )
-    with colF2:
-        send_document = st.checkbox(
-            "Ardından PDF'yi belge (document) olarak gönder",
-            value=True,
-            help="file_url doğrudan indirilebilir/görüntülenebilir olmalı."
-        )
 
     go_send = st.button("🚀 Gönderimi Başlat", use_container_width=True, key="wa_send")
 
@@ -1592,7 +1467,7 @@ with tab_w:
             did = row.get("daire_id", "")
             furl = row.get("file_url", "")
 
-            # 1) Şablonla başlat
+            # 1) Şablon mesaj
             try:
                 r1 = send_template(
                     wa_token, phone_number_id, to,
@@ -1614,37 +1489,8 @@ with tab_w:
             success_cnt += 1 if success else 0
             fail_cnt += 0 if success else 1
 
-            if success:
-                time.sleep(0.4)
-                if send_followup_text and followup_text:
-                    try:
-                        msg = followup_text.format(name=name, daire_id=did, file_url=furl)
-                    except Exception:
-                        msg = followup_text
-                    r2 = send_text(wa_token, phone_number_id, to, msg)
-                    send_results.append({
-                        "to": to,
-                        "step": "text",
-                        "ok": r2.ok,
-                        "info": ("" if r2.ok else f"{r2.status_code}: {r2.text}")
-                    })
-                    time.sleep(0.3)
-                if send_document and furl:
-                    cap = f"{did} bildirimi"
-                    r3 = send_document_msg(wa_token, phone_number_id, to, furl, cap)
-                    send_results.append({
-                        "to": to,
-                        "step": "document",
-                        "ok": r3.ok,
-                        "info": ("" if r3.ok else f"{r3.status_code}: {r3.text}")
-                    })
-                    time.sleep(0.3)
-
             progress.progress((i+1) / total)
+            time.sleep(0.4)
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
-
-# ---------------- TAB R: Gelir-Gider Raporu (PDF) ----------------
-with tab_r:
-    st.info("Gelir-Gider Raporu (PDF) modülü henüz eklenmedi. Sonra buraya rapor ekranını koyarız.")
