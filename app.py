@@ -1,5 +1,3 @@
-1 aralık 2025
-
 # app.py
 # === Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
 import io, os, re, zipfile, unicodedata, json, uuid, time
