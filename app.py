@@ -12,6 +12,7 @@ try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaIoBaseUpload  # UPLOAD için
     _GDRIVE_OK = True
 except Exception:
     _GDRIVE_OK = False
@@ -80,6 +81,22 @@ def build_direct_file_link(file_id: str, mode: str = "download") -> str:
     else:
         return f"https://drive.google.com/uc?export=download&id={file_id}"
 
+
+def upload_pdf_to_folder(service, folder_id: str, file_name: str, data: bytes):
+    """
+    Tek bir PDF dosyasını verilen klasöre yükler.
+    """
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf", resumable=False)
+    file_metadata = {
+        "name": file_name,
+        "parents": [folder_id]
+    }
+    return service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id",
+        supportsAllDrives=True
+    ).execute()
 
 # PDF
 from pypdf import PdfReader, PdfWriter
@@ -1097,6 +1114,28 @@ with tab_a:
         index=2,
         key="mode"
     )
+
+    st.subheader("📂 Google Drive (opsiyonel)")
+    if not _GDRIVE_OK:
+        st.info("Google Drive entegrasyonu için gerekli kütüphaneler yüklü değil.")
+        drive_upload_on = False
+        folder_id_a = ""
+    else:
+        col_da1, col_da2 = st.columns([2, 1])
+        with col_da1:
+            folder_id_a = st.text_input(
+                "Drive Folder ID (oluşan PDF'ler için)",
+                value=DEFAULT_DRIVE_FOLDER_ID,
+                key="folder_a",
+                help="PDF'lerin yükleneceği klasörün ID'si"
+            )
+        with col_da2:
+            drive_upload_on = st.checkbox(
+                "Oluşan PDF'leri Drive'a yükle",
+                value=False,
+                key="up_a"
+            )
+
     go = st.button("🚀 Başlat", key="go_a")
 
     if go:
@@ -1106,8 +1145,19 @@ with tab_a:
 
         src = pdf_file.read()
 
+        # Drive servisini gerekirse hazırla
+        service_a = None
+        if _GDRIVE_OK and drive_upload_on and folder_id_a.strip():
+            try:
+                service_a = get_drive_service_from_secrets()
+            except Exception as e:
+                st.error(f"Drive servisine bağlanılamadı: {e}")
+                service_a = None
+
         if mode == "Sadece sayfalara böl":
             pages = split_pdf(src)
+
+            # ZIP indir
             with io.BytesIO() as zbuf:
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
                     for name, data in pages:
@@ -1115,6 +1165,15 @@ with tab_a:
                 st.download_button("📥 Bölünmüş sayfalar (ZIP)",
                                    zbuf.getvalue(),
                                    file_name="bolunmus_sayfalar.zip")
+
+            # Drive'a yükle
+            if service_a:
+                try:
+                    for name, data in pages:
+                        upload_pdf_to_folder(service_a, folder_id_a.strip(), name, data)
+                    st.success("Bölünmüş PDF'ler belirtilen Drive klasörüne yüklendi.")
+                except Exception as e:
+                    st.error(f"Drive'a yükleme sırasında hata: {e}")
 
         elif mode == "Sadece alt yazı uygula (tek PDF)":
             stamped = add_footer_to_pdf(
@@ -1128,6 +1187,14 @@ with tab_a:
                 bold_rules=bold_rules,
             )
             st.download_button("📥 Alt yazılı PDF", stamped, file_name="alt_yazili.pdf")
+
+            # İstenirse tek PDF'i de Drive'a yükle
+            if service_a:
+                try:
+                    upload_pdf_to_folder(service_a, folder_id_a.strip(), "alt_yazili.pdf", stamped)
+                    st.success("Alt yazılı tek PDF Drive klasörüne yüklendi.")
+                except Exception as e:
+                    st.error(f"Drive'a yükleme sırasında hata: {e}")
 
         else:
             footer_kwargs = dict(
@@ -1154,6 +1221,8 @@ with tab_a:
                 stamp_opts=stamp_opts,
                 rename_files=rename_files,
             )
+
+            # ZIP indir
             with io.BytesIO() as zbuf:
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
                     for name, data in pages:
@@ -1161,6 +1230,15 @@ with tab_a:
                 st.download_button("📥 Alt yazılı & bölünmüş (ZIP)",
                                    zbuf.getvalue(),
                                    file_name="alt_yazili_bolunmus.zip")
+
+            # Drive'a yükle
+            if service_a:
+                try:
+                    for name, data in pages:
+                        upload_pdf_to_folder(service_a, folder_id_a.strip(), name, data)
+                    st.success("Alt yazılı & bölünmüş PDF'ler Drive klasörüne yüklendi.")
+                except Exception as e:
+                    st.error(f"Drive'a yükleme sırasında hata: {e}")
 
 # ---------------- TAB B: Apsiyon Gider Doldurucu ----------------
 with tab_b:
@@ -1225,7 +1303,6 @@ with tab_b:
 
         # 3) PDF toplamını (artık dairelere eklenmiş haliyle) hesapla
         pdf_total = sum(v.get("toplam", 0.0) for v in totals_map.values())
-        grand_total = pdf_total
 
         st.info(
             f"**Dairelere eklenmiş yeni PDF toplamı:** {pdf_total:,.2f} TL\n\n"
@@ -1280,16 +1357,37 @@ with tab_c:
             help="Klasör ID: 1QTVqRbxim9OxsSOD33uvesQg2dUO2r2n"
         )
 
+        # Bu sekmede de PDF'leri klasöre yükleyebilme
+        upload_pdfs = st.file_uploader(
+            "Bu Drive klasörüne yüklemek için PDF seç (opsiyonel, birden fazla)",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="wa_pdf_upload"
+        )
+        upload_btn = st.button("📤 Seçilen PDF'leri bu Drive klasörüne yükle", key="wa_pdf_upload_btn")
+
+        if upload_btn:
+            if not folder_id.strip():
+                st.error("Folder ID boş olamaz.")
+            elif not upload_pdfs:
+                st.warning("Önce yüklenecek PDF(ler)i seçin.")
+            else:
+                try:
+                    service = get_drive_service_from_secrets()
+                    for f in upload_pdfs:
+                        data = f.read()
+                        upload_pdf_to_folder(service, folder_id.strip(), f.name, data)
+                    st.success(f"{len(upload_pdfs)} adet PDF Drive klasörüne yüklendi.")
+                except Exception as e:
+                    st.error(f"Yükleme sırasında hata: {e}")
+
         rehber_up2 = st.file_uploader(
             "Rehber (XLSX/CSV) — Apsiyon ham dosya",
             type=["xlsx", "csv"], key="wa_rehber2"
         )
 
-        link_mode = st.radio(
-            "Link tipi",
-            ["Doğrudan indirme (önerilir)", "Görüntüleme linki (Drive görünümü)"],
-            horizontal=True
-        )
+        # Link tipi SABİT: görüntüleme (view)
+        st.caption("Oluşturulacak linkler **sadece görüntüleme (Drive görünümü)** olacaktır.")
 
         drive_go = st.button("🗂️ Drive’dan PDF’leri çek, eşleştir ve CSV üret",
                              use_container_width=True)
@@ -1349,7 +1447,7 @@ with tab_c:
             )
 
             # 6) Dosyaları "linke sahip olan görüntüleyebilir" yap + link üret
-            link_kind = "download" if link_mode.startswith("Doğrudan") else "view"
+            link_kind = "view"  # SABİT: sadece görüntüleme linki
 
             st.write("🔓 Dosyalar paylaşıma açılıyor ve linkler oluşturuluyor (dosya bazında)...")
             for i, row in merged.iterrows():
