@@ -1716,11 +1716,11 @@ with tab_panel:
                                         phone=to_phone,
                                         text=reply_text.strip()
                                     )
-                                st.experimental_rerun()
+                                st.rerun()
                             else:
                                 st.error(f"Mesaj gönderilemedi: {resp.status_code} - {resp.text}")
                         except Exception as e:
                             st.error(f"Mesaj gönderirken hata oluştu: {e}")
 
     if st.button("🔄 Listeyi yenile", key="panel_refresh_btn"):
-        st.experimental_rerun()
+        st.rerun()
