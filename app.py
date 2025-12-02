@@ -1,6 +1,7 @@
 # app.py
 # === Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon & WhatsApp (Drive entegrasyonlu) ===
-import io, os, re, zipfile, unicodedata, json, uuid, time
+import io, os, re, zipfile, unicodedata, json, uuid, time, sqlite3
+from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from urllib.parse import quote_plus
 import streamlit as st
@@ -1000,15 +1001,110 @@ def send_document_msg(access_token: str, phone_id: str, to: str, file_url: str, 
     return r
 
 # -----------------------------------------------------------------------------
+# WhatsApp Mesaj Paneli için DB yardımcıları
+# -----------------------------------------------------------------------------
+DB_PATH = os.getenv("WHATSAPP_DB_PATH", "whatsapp_messages.db")
+
+
+def get_connection():
+    """
+    Mesaj DB'sine bağlanır ve tablo yoksa oluşturur.
+    """
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wa_chat_id TEXT,
+            wa_message_id TEXT,
+            direction TEXT,           -- 'in' / 'out'
+            sender_name TEXT,
+            phone TEXT,
+            message TEXT,
+            timestamp TEXT,
+            raw_json TEXT
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def get_chats():
+    """
+    Farklı numaraları (sohbetleri) listeler, her biri için son mesajı ve zamanı getirir.
+    """
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT wa_chat_id,
+                   MAX(timestamp) as last_ts,
+                   MAX(CASE WHEN direction='in' THEN message ELSE '' END) as last_in_msg,
+                   MAX(CASE WHEN direction='out' THEN message ELSE '' END) as last_out_msg
+            FROM messages
+            GROUP BY wa_chat_id
+            ORDER BY last_ts DESC
+            """
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def get_conversation(wa_chat_id: str):
+    """
+    Belirli bir numarayla olan tüm konuşmayı getir.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT direction, sender_name, phone, message, timestamp
+        FROM messages
+        WHERE wa_chat_id = ?
+        ORDER BY datetime(timestamp) ASC
+        """,
+        (wa_chat_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def save_outgoing(wa_chat_id: str, phone: str, text: str, wa_message_id: str = "", raw_json: str = "{}"):
+    """
+    Panelden veya toplu gönderimden çıkan mesajı DB'ye kaydeder.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    ts_str = datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+    cur.execute(
+        """
+        INSERT INTO messages
+        (wa_chat_id, wa_message_id, direction, sender_name, phone, message, timestamp, raw_json)
+        VALUES (?, ?, 'out', ?, ?, ?, ?, ?)
+        """,
+        (wa_chat_id, wa_message_id, "Yönetim", phone, text, ts_str, raw_json),
+    )
+    conn.commit()
+    conn.close()
+
+# -----------------------------------------------------------------------------
 # UI — Sekmeler
 # -----------------------------------------------------------------------------
 st.title("🧾 Atlas Vadi Fatura — Böl & Alt Yazı & Apsiyon")
 
-tab_a, tab_b, tab_c, tab_w = st.tabs([
+tab_a, tab_b, tab_c, tab_w, tab_panel = st.tabs([
     "📄 Böl & Alt Yazı",
     "📊 Apsiyon Gider Doldurucu",
     "📤 WhatsApp Gönderim Hazırlığı",
-    "📲 WhatsApp Gönder (Cloud API)"
+    "📲 WhatsApp Gönder (Cloud API)",
+    "💬 Mesaj Paneli"
 ])
 
 # ---------------- TAB A: Böl & Alt Yazı ----------------
@@ -1478,6 +1574,20 @@ with tab_w:
                 if r1.ok:
                     success = True
                     info = "template OK"
+
+                    # Mesaj panelinde de görünsün diye DB'ye kayıt (şablon metnini özet olarak yazalım)
+                    try:
+                        resp_json = r1.json()
+                        msg_id = ""
+                        if isinstance(resp_json, dict):
+                            msgs = resp_json.get("messages")
+                            if msgs and isinstance(msgs, list):
+                                msg_id = msgs[0].get("id", "")
+                        log_text = f"[ŞABLON:{template_name}] {did} → {furl}"
+                        save_outgoing(wa_chat_id=to, phone=to, text=log_text, wa_message_id=msg_id, raw_json=json.dumps(resp_json, ensure_ascii=False))
+                    except Exception:
+                        # JSON parse vs patlarsa log'u boş da olsa kaydedelim
+                        save_outgoing(wa_chat_id=to, phone=to, text=f"[ŞABLON:{template_name}] {did} → {furl}")
                 else:
                     success = False
                     info = f"template ERR {r1.status_code}: {r1.text}"
@@ -1494,3 +1604,123 @@ with tab_w:
 
         st.success(f"Gönderim bitti. Başarılı: {success_cnt}, Hatalı: {fail_cnt}")
         st.dataframe(pd.DataFrame(send_results), use_container_width=True)
+
+# ---------------- TAB PANEL: WhatsApp Mesaj Paneli ----------------
+with tab_panel:
+    st.subheader("💬 WhatsApp Kat Maliki Mesaj Paneli")
+
+    st.markdown(
+        "Bu ekranda Cloud API numarasına gelen mesajları görebilir ve **panel üzerinden cevap yazabilirsiniz**. "
+        "Mesajlar `whatsapp_messages.db` dosyasında tutulur."
+    )
+
+    # API kimlikleri (secrets'tan otomatik çek, istersen değiştir)
+    st.markdown("#### Cloud API Ayarları (cevap göndermek için)")
+    default_token_p = st.secrets.get("whatsapp", {}).get("token", "")
+    default_phone_id_p = st.secrets.get("whatsapp", {}).get("phone_number_id", "")
+    colP1, colP2 = st.columns(2)
+    with colP1:
+        wa_token_p = st.text_input("Access Token", value=default_token_p, type="password", key="panel_token")
+    with colP2:
+        phone_number_id_p = st.text_input("Phone Number ID", value=default_phone_id_p, key="panel_phone_id")
+
+    chats = get_chats()
+
+    if not chats:
+        st.info("Henüz hiç mesaj yok. Webhook çalıştığında / gönderim yaptığında burada sohbetler listelenecek.")
+    else:
+        cols = st.columns([1, 2])
+
+        with cols[0]:
+            st.markdown("**Sohbetler (Numaralar)**")
+            chat_labels = []
+            for wa_chat_id, last_ts, last_in_msg, last_out_msg in chats:
+                last_msg = (last_in_msg or last_out_msg or "").replace("\n", " ")
+                label = f"{wa_chat_id} | {last_ts} | {last_msg[:30]}"
+                chat_labels.append(label)
+
+            selected = st.radio(
+                "Sohbet seç:",
+                options=list(range(len(chats))),
+                format_func=lambda i: chat_labels[i],
+                key="panel_selected_chat_idx"
+            )
+            selected_chat_id = chats[selected][0]
+
+        with cols[1]:
+            st.markdown(f"**Sohbet Detayı: {selected_chat_id}**")
+            conv = get_conversation(selected_chat_id)
+
+            if not conv:
+                st.write("Bu numara için kayıtlı mesaj yok.")
+            else:
+                for direction, sender_name, phone, message, ts in conv:
+                    if direction == "in":
+                        st.markdown(
+                            f"""
+                            <div style="text-align:left; border-radius:8px; padding:8px; margin:4px; background-color:#f0f0f0;">
+                            <b>{(sender_name or phone or 'Kat Maliki')} - {ts}</b><br>{message}
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f"""
+                            <div style="text-align:right; border-radius:8px; padding:8px; margin:4px; background-color:#d2f8d2;">
+                            <b>Yönetim - {ts}</b><br>{message}
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown("---")
+                st.subheader("Cevap Yaz")
+
+                # son mesajdaki telefon bilgisi varsa onu kullan, yoksa wa_chat_id'yi kullan
+                default_phone = conv[-1][2] if conv and conv[-1][2] else selected_chat_id
+                reply_text = st.text_area("Mesajınız", height=100, key="reply_box_panel")
+                col_send1, col_send2 = st.columns([1, 4])
+
+                with col_send1:
+                    send_btn_panel = st.button("Gönder", key="panel_send_btn")
+
+                if send_btn_panel:
+                    if not reply_text.strip():
+                        st.warning("Boş mesaj gönderemezsiniz.")
+                    elif not wa_token_p or not phone_number_id_p:
+                        st.error("Cevap gönderebilmek için Access Token ve Phone Number ID girin.")
+                    else:
+                        to_phone = default_phone
+                        try:
+                            resp = send_text(wa_token_p, phone_number_id_p, to_phone, reply_text.strip())
+                            if resp.status_code < 300:
+                                st.success("Mesaj gönderildi.")
+                                try:
+                                    resp_json = resp.json()
+                                    msg_id = ""
+                                    if isinstance(resp_json, dict):
+                                        msgs = resp_json.get("messages")
+                                        if msgs and isinstance(msgs, list):
+                                            msg_id = msgs[0].get("id", "")
+                                    save_outgoing(
+                                        wa_chat_id=selected_chat_id,
+                                        phone=to_phone,
+                                        text=reply_text.strip(),
+                                        wa_message_id=msg_id,
+                                        raw_json=json.dumps(resp_json, ensure_ascii=False)
+                                    )
+                                except Exception:
+                                    save_outgoing(
+                                        wa_chat_id=selected_chat_id,
+                                        phone=to_phone,
+                                        text=reply_text.strip()
+                                    )
+                                st.experimental_rerun()
+                            else:
+                                st.error(f"Mesaj gönderilemedi: {resp.status_code} - {resp.text}")
+                        except Exception as e:
+                            st.error(f"Mesaj gönderirken hata oluştu: {e}")
+
+    if st.button("🔄 Listeyi yenile", key="panel_refresh_btn"):
+        st.experimental_rerun()
